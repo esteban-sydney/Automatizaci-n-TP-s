@@ -1,0 +1,88 @@
+=====================================================
+  INSTRUCCIONES DE INSTALACIÓN — Control TP Entel
+=====================================================
+
+REQUISITOS PREVIOS
+------------------
+
+1. Python 3.11
+   Descargar desde: https://www.python.org/downloads/
+   Durante la instalación marcar: "Add Python to PATH" ✅
+
+2. Microsoft Edge
+   Viene instalado por defecto en Windows 10/11.
+
+3. Git
+   Descargar desde: https://git-scm.com/downloads
+
+
+PASO A PASO
+-----------
+
+1. Clonar el repositorio
+   Abrir una terminal (CMD o PowerShell) y ejecutar:
+
+   git clone <URL del repositorio>
+   cd <nombre de la carpeta>
+
+2. Crear entorno virtual
+
+   python -m venv venv
+
+3. Activar el entorno virtual
+
+   venv\Scripts\activate
+
+   Sabrá que está activo cuando aparezca (venv) al inicio de la línea.
+
+4. Instalar dependencias
+
+   pip install -r requirements.txt
+
+5. Instalar Playwright y navegador Edge
+
+   playwright install msedge
+
+6. Ejecutar el proyecto
+
+   python main_integrado.py
+
+
+POSIBLES ERRORES
+----------------
+
+"python no se reconoce como comando"
+  → Python no quedó en el PATH.
+  → Reinstalar marcando "Add Python to PATH", o usar "py" en lugar de "python".
+
+"playwright no se reconoce"
+  → El entorno virtual no está activado.
+  → Ejecutar: venv\Scripts\activate
+
+"No module named X"
+  → Ejecutar manualmente:
+  pip install playwright python-telegram-bot==13.15 PyPDF2 requests
+
+
+USO DE LA APLICACIÓN
+--------------------
+
+Al ejecutar main_integrado.py:
+
+1. Se abrirá una ventana solicitando usuario y contraseña del portal PSG.
+2. Se abrirá el navegador Edge y se iniciará sesión automáticamente.
+3. El bot de Telegram quedará activo en segundo plano.
+
+Desde Telegram, enviar /start al bot para comenzar.
+Opciones disponibles:
+  1 - Iniciar TP (solicita: N° TP, Nombre, Teléfono, Empresa)
+  2 - Cerrar TP  (solicita: N° TP, Nombre, Teléfono)
+
+
+NOTA IMPORTANTE
+---------------
+
+El archivo config.py contiene el token de Telegram y usuarios autorizados.
+No compartir este archivo fuera del equipo de trabajo.
+
+=====================================================

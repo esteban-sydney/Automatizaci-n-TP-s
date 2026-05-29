@@ -60,7 +60,14 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("📋 Ingrese número TP:")
 
             else:
-                await update.message.reply_text("❌ Opción inválida. Escriba 1 o 2.")
+                 mensaje = (
+                "❌ Opción inválida en caso de problemas llamar al 22 360 2280 \n\n"
+                "🔧 Control TP Entel\n\n"
+                "1.- Iniciar TP\n"
+                "2.- Cerrar TP"
+            )
+
+                 await update.message.reply_text(mensaje)
 
             return
 
@@ -126,7 +133,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # INICIAR: pedir empresa además
             estado["paso"] = "empresa"
-            await update.message.reply_text("🏢 Ingrese empresa (o escriba - si no aplica):")
+            await update.message.reply_text("🏢 Ingrese empresa:")
             return
 
         # ── EMPRESA (solo para iniciar) ───────────────────

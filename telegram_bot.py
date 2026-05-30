@@ -1,7 +1,8 @@
 print("🔥 BOT FILE LOADED")
 import asyncio
+from datetime import datetime, timedelta
 from Prueba2PDF import cola_telegram
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -9,31 +10,120 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from config import TELEGRAM_TOKEN
+from config import TELEGRAM_TOKEN, AUTHORIZED_USERS
 
 estado_usuario = {}
+
+# =========================
+# CONFIGURACIÓN
+# =========================
+MAX_ERRORES = 5
+BLOQUEO_MINUTOS = 10
+ANEXO_OFICINA = "22 360 2280"
+
+errores_usuario = {}
+bloqueo_usuario = {}
+
+def registrar_error(chat_id: int) -> int:
+    errores_usuario[chat_id] = errores_usuario.get(chat_id, 0) + 1
+    return errores_usuario[chat_id]
+
+def resetear_errores(chat_id: int):
+    errores_usuario[chat_id] = 0
+
+def esta_bloqueado(chat_id: int) -> bool:
+    if chat_id in bloqueo_usuario:
+        if datetime.now() < bloqueo_usuario[chat_id]:
+            return True
+        else:
+            del bloqueo_usuario[chat_id]
+            errores_usuario[chat_id] = 0
+    return False
+
+def tiempo_restante(chat_id: int) -> str:
+    if chat_id in bloqueo_usuario:
+        restante = bloqueo_usuario[chat_id] - datetime.now()
+        minutos = int(restante.total_seconds() // 60)
+        segundos = int(restante.total_seconds() % 60)
+        return f"{minutos}m {segundos}s"
+    return "0s"
+
+def intentos_restantes(chat_id: int) -> int:
+    return MAX_ERRORES - errores_usuario.get(chat_id, 0)
+
+# =========================
+# TECLADO MENÚ
+# =========================
+MENU_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton("1️⃣ Iniciar TP"), KeyboardButton("2️⃣ Cerrar TP")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+    input_field_placeholder="Seleccione una opción..."
+)
+
+QUITAR_TECLADO = ReplyKeyboardRemove()
+
+# =========================
+# MENSAJE DE ERROR DE SISTEMA
+# =========================
+MSG_ERROR_SISTEMA = (
+    "⚠️ El sistema no está disponible en este momento.\n\n"
+    "Por favor contacte a la oficina al anexo:\n"
+    f"📞 *{ANEXO_OFICINA}*\n\n"
+    "Un operador podrá asistirle y restablecer el sistema."
+)
+
+# =========================
+# VERIFICAR USUARIO
+# =========================
+async def verificar_usuario(update: Update) -> bool:
+    chat_id = update.effective_chat.id
+
+    if esta_bloqueado(chat_id):
+        await update.message.reply_text(
+            f"🔒 Tu acceso está bloqueado por {tiempo_restante(chat_id)}.\n"
+            f"Intenta nuevamente más tarde."
+        )
+        return False
+
+    if chat_id not in AUTHORIZED_USERS:
+        print(f"⛔ Acceso denegado para chat_id: {chat_id}")
+        await update.message.reply_text(
+            "⛔ No tienes autorización para usar este sistema.\n"
+            "Contacta al administrador."
+        )
+        return False
+
+    return True
 
 # =========================
 # START
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    if not await verificar_usuario(update):
+        return
+
     print("✅ /start ejecutado")
 
-    mensaje = (
-        "🔧 Control TP Entel\n\n"
-        "1.- Iniciar TP\n"
-        "2.- Cerrar TP"
+    chat_id = update.effective_chat.id
+    estado_usuario[chat_id] = {"paso": "menu"}
+
+    await update.message.reply_text(
+        "👋 Bienvenido al sistema de Control TP Entel.\n\n"
+        "Seleccione una opción:",
+        reply_markup=MENU_KEYBOARD
     )
-
-    estado_usuario[update.effective_chat.id] = {"paso": "menu"}
-
-    await update.message.reply_text(mensaje)
 
 # =========================
 # RESPONDER
 # =========================
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not await verificar_usuario(update):
+        return
 
     try:
 
@@ -42,6 +132,11 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if chat_id not in estado_usuario:
             estado_usuario[chat_id] = {"paso": "menu"}
+            await update.message.reply_text(
+                "Seleccione una opción:",
+                reply_markup=MENU_KEYBOARD
+            )
+            return
 
         estado = estado_usuario[chat_id]
         paso = estado["paso"]
@@ -49,73 +144,156 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ── MENU ─────────────────────────────────────────
         if paso == "menu":
 
-            if texto == "1":
+            if texto in ["1️⃣ Iniciar TP", "1"]:
+                resetear_errores(chat_id)
                 estado["accion"] = "iniciar"
                 estado["paso"] = "numero"
-                await update.message.reply_text("📋 Ingrese número TP:")
+                await update.message.reply_text(
+                    "📋 *Iniciar TP*\n\n"
+                    "Ingrese el número de TP:\n"
+                    "_(7 dígitos numéricos. Ejemplo: 1905610)_",
+                    parse_mode="Markdown",
+                    reply_markup=QUITAR_TECLADO
+                )
 
-            elif texto == "2":
+            elif texto in ["2️⃣ Cerrar TP", "2"]:
+                resetear_errores(chat_id)
                 estado["accion"] = "cerrar"
                 estado["paso"] = "numero"
-                await update.message.reply_text("📋 Ingrese número TP:")
+                await update.message.reply_text(
+                    "🔒 *Cerrar TP*\n\n"
+                    "Ingrese el número de TP:\n"
+                    "_(7 dígitos numéricos. Ejemplo: 1905610)_",
+                    parse_mode="Markdown",
+                    reply_markup=QUITAR_TECLADO
+                )
 
             else:
-                 mensaje = (
-                "❌ Opción inválida en caso de problemas llamar al 22 360 2280 \n\n"
-                "🔧 Control TP Entel\n\n"
-                "1.- Iniciar TP\n"
-                "2.- Cerrar TP"
-            )
+                total = registrar_error(chat_id)
 
-                 await update.message.reply_text(mensaje)
-
+                if total >= MAX_ERRORES:
+                    bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                    await update.message.reply_text(
+                        f"🔒 Demasiados intentos incorrectos.\n"
+                        f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
+                        reply_markup=QUITAR_TECLADO
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ Opción inválida. Use los botones del menú.\n\n"
+                        f"⚠️ {intentos_restantes(chat_id)} intentos restantes.",
+                        reply_markup=MENU_KEYBOARD
+                    )
             return
 
-        # ── NUMERO (común para iniciar y cerrar) ─────────
+        # ── NUMERO ───────────────────────────────────────
         if paso == "numero":
 
-            if not texto.isdigit():
-                await update.message.reply_text("❌ El número TP debe contener solo dígitos. Intente nuevamente:")
+            if not texto.isdigit() or len(texto) != 7:
+                total = registrar_error(chat_id)
+
+                if total >= MAX_ERRORES:
+                    bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                    await update.message.reply_text(
+                        f"🔒 Demasiados intentos incorrectos.\n"
+                        f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos."
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ Número de TP incorrecto.\n\n"
+                        f"📌 Debe ser exactamente *7 dígitos numéricos*.\n"
+                        f"📌 Ejemplo: 1905610\n\n"
+                        f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
+                        f"Ingrese número de TP:",
+                        parse_mode="Markdown"
+                    )
                 return
 
+            resetear_errores(chat_id)
             estado["numero"] = texto
             estado["paso"] = "nombre"
-            await update.message.reply_text("👤 Ingrese su nombre:")
+            await update.message.reply_text(
+                "👤 Ingrese su nombre y apellido:\n"
+                "_(Ejemplo: Juan Pérez)_",
+                parse_mode="Markdown"
+            )
             return
 
-        # ── NOMBRE (común para iniciar y cerrar) ─────────
+        # ── NOMBRE ───────────────────────────────────────
         if paso == "nombre":
 
-            if len(texto) < 3:
-                await update.message.reply_text("❌ Nombre muy corto. Intente nuevamente:")
+            partes = texto.strip().split()
+            tiene_letras = any(c.isalpha() for c in texto)
+            es_valido = len(partes) >= 2 and tiene_letras and len(texto) >= 6
+
+            if not es_valido:
+                total = registrar_error(chat_id)
+
+                if total >= MAX_ERRORES:
+                    bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                    await update.message.reply_text(
+                        f"🔒 Demasiados intentos incorrectos.\n"
+                        f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos."
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ Nombre incorrecto.\n\n"
+                        f"📌 Debe ingresar *nombre y apellido*.\n"
+                        f"📌 Ejemplo: Juan Pérez\n\n"
+                        f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
+                        f"Ingrese su nombre y apellido:",
+                        parse_mode="Markdown"
+                    )
                 return
 
+            resetear_errores(chat_id)
             estado["nombre"] = texto
             estado["paso"] = "telefono"
-            await update.message.reply_text("📱 Ingrese su teléfono:")
+            await update.message.reply_text(
+                "📱 Ingrese su número de teléfono:\n"
+                "_(9 dígitos, sin espacios. Ejemplo: 912345678)_",
+                parse_mode="Markdown"
+            )
             return
 
-        # ── TELEFONO ──────────────────────────────────────
+        # ── TELEFONO ─────────────────────────────────────
         if paso == "telefono":
 
-            if not texto.isdigit() or len(texto) < 8:
-                await update.message.reply_text("❌ Teléfono inválido. Solo números, mínimo 8 dígitos:")
+            if not texto.isdigit() or len(texto) != 9:
+                total = registrar_error(chat_id)
+
+                if total >= MAX_ERRORES:
+                    bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                    await update.message.reply_text(
+                        f"🔒 Demasiados intentos incorrectos.\n"
+                        f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos."
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ Teléfono incorrecto.\n\n"
+                        f"📌 Debe ser exactamente *9 dígitos numéricos*, sin espacios ni guiones.\n"
+                        f"📌 Ejemplo: 912345678\n\n"
+                        f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
+                        f"Ingrese su teléfono:",
+                        parse_mode="Markdown"
+                    )
                 return
 
+            resetear_errores(chat_id)
             estado["telefono"] = texto
 
-            # CERRAR: listo con 3 datos, encolar
+            # CERRAR — listo con 3 datos
             if estado["accion"] == "cerrar":
 
                 resumen = (
-                    f"📋 Resumen cierre:\n"
+                    f"📋 *Resumen cierre:*\n"
                     f"• TP: {estado['numero']}\n"
                     f"• Nombre: {estado['nombre']}\n"
                     f"• Teléfono: {estado['telefono']}\n\n"
                     f"⏳ Procesando..."
                 )
 
-                await update.message.reply_text(resumen)
+                await update.message.reply_text(resumen, parse_mode="Markdown")
 
                 cola_telegram.put({
                     "accion": "cerrar",
@@ -126,17 +304,24 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "chat_id": chat_id
                 })
 
-                print(f"📤 Cola PUT (cerrar) — id: {id(cola_telegram)} | tamaño: {cola_telegram.qsize()}")
-
+                print(f"📤 Cola PUT (cerrar) — tamaño: {cola_telegram.qsize()}")
                 estado_usuario[chat_id] = {"paso": "menu"}
+
+                await update.message.reply_text(
+                    "¿Desea realizar otra operación?",
+                    reply_markup=MENU_KEYBOARD
+                )
                 return
 
-            # INICIAR: pedir empresa además
+            # INICIAR — pedir empresa
             estado["paso"] = "empresa"
-            await update.message.reply_text("🏢 Ingrese empresa:")
+            await update.message.reply_text(
+                "🏢 Ingrese el nombre de su empresa:\n",
+                parse_mode="Markdown"
+            )
             return
 
-        # ── EMPRESA (solo para iniciar) ───────────────────
+        # ── EMPRESA (solo iniciar) ────────────────────────
         if paso == "empresa":
 
             empresa = "" if texto == "-" else texto
@@ -144,7 +329,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["paso"] = "menu"
 
             resumen = (
-                f"📋 Resumen inicio:\n"
+                f"📋 *Resumen inicio:*\n"
                 f"• TP: {estado['numero']}\n"
                 f"• Nombre: {estado['nombre']}\n"
                 f"• Teléfono: {estado['telefono']}\n"
@@ -152,7 +337,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏳ Procesando..."
             )
 
-            await update.message.reply_text(resumen)
+            await update.message.reply_text(resumen, parse_mode="Markdown")
 
             cola_telegram.put({
                 "accion": "iniciar",
@@ -163,13 +348,20 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "chat_id": chat_id
             })
 
-            print(f"📤 Cola PUT (iniciar) — id: {id(cola_telegram)} | tamaño: {cola_telegram.qsize()}")
-
+            print(f"📤 Cola PUT (iniciar) — tamaño: {cola_telegram.qsize()}")
             estado_usuario[chat_id] = {"paso": "menu"}
+
+            await update.message.reply_text(
+                "¿Desea realizar otra operación?",
+                reply_markup=MENU_KEYBOARD
+            )
 
     except Exception as e:
         print("ERROR BOT:", e)
-        await update.message.reply_text("⚠️ Ocurrió un error. Use /start para reiniciar.")
+        await update.message.reply_text(
+            MSG_ERROR_SISTEMA,
+            parse_mode="Markdown"
+        )
 
 # =========================
 # INICIAR BOT

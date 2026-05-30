@@ -215,7 +215,7 @@ def ejecutar_validacion(event=None):
 
     if not ruta_pdf_1 and not ruta_pdf_2:
         messagebox.showwarning("Atención", "Debe cargar al menos un PDF")
-        return None
+        return "SIN_PDF"
 
     if not buscar_en_pdf(numero):
         label_resultado.config(text="❌ TP no existe en PDFs", fg="red")
@@ -489,12 +489,22 @@ def procesar_cola_telegram():
 
         estado_tp = ejecutar_validacion()
 
+        MSG_SISTEMA_NO_DISPONIBLE = (
+            "⚠️ El sistema no está disponible en este momento.\n\n"
+            "Por favor contacte a la oficina al anexo:\n"
+            "📞 22 360 2280\n\n"
+            "Un operador podrá asistirle y restablecer el sistema."
+        )
+
         # ── INICIAR ──────────────────────────────────────
         if datos["accion"] == "iniciar":
 
-            if estado_tp == "NO_PDF":
+            if estado_tp == "SIN_PDF":
+                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+
+            elif estado_tp == "NO_PDF":
                 enviar_mensaje_telegram(chat_id,
-                    f"❌ TP {datos['numero']} no fue encontrado en los PDFs cargados.")
+                    f"❌ TP {datos['numero']} no fue encontrado en los PDFs del día.")
 
             elif estado_tp == "POSPUESTO":
                 enviar_mensaje_telegram(chat_id,
@@ -517,20 +527,21 @@ def procesar_cola_telegram():
                             f"✅ TP {datos['numero']} iniciado correctamente.\n"
                             f"Operador: {datos['nombre']} | Tel: {datos['telefono']}")
                     else:
-                        enviar_mensaje_telegram(chat_id,
-                            f"❌ No fue posible iniciar el TP {datos['numero']}. Revise la aplicación.")
+                        enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
                 ventana.after(1500, run_inicio)
 
-            elif estado_tp == "ERROR":
-                enviar_mensaje_telegram(chat_id,
-                    f"❌ Error al consultar el TP {datos['numero']} en el portal.")
+            elif estado_tp in ("ERROR", None):
+                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
 
         # ── CERRAR ───────────────────────────────────────
         else:
 
-            if estado_tp == "NO_PDF":
+            if estado_tp == "SIN_PDF":
+                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+
+            elif estado_tp == "NO_PDF":
                 enviar_mensaje_telegram(chat_id,
-                    f"❌ TP {datos['numero']} no fue encontrado en los PDFs cargados.")
+                    f"❌ TP {datos['numero']} no fue encontrado en los PDFs del día.")
 
             elif estado_tp == "EJECUTADO":
                 enviar_mensaje_telegram(chat_id,
@@ -545,7 +556,6 @@ def procesar_cola_telegram():
                     f"⚠️ TP {datos['numero']} se encuentra POSPUESTO.")
 
             elif estado_tp == "EN_EJECUCION":
-                # Cierre directo sin modal — nombre y teléfono vienen de Telegram
                 nombre_cierre = datos["nombre"]
                 telefono_cierre = datos["telefono"]
 
@@ -556,14 +566,12 @@ def procesar_cola_telegram():
                             f"✅ TP {datos['numero']} finalizado correctamente.\n"
                             f"Operador: {nombre_cierre} | Tel: {telefono_cierre}")
                     else:
-                        enviar_mensaje_telegram(chat_id,
-                            f"❌ No fue posible cerrar el TP {datos['numero']}. Revise la aplicación.")
+                        enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
 
                 ventana.after(1500, run_cierre)
 
-            elif estado_tp == "ERROR":
-                enviar_mensaje_telegram(chat_id,
-                    f"❌ Error al consultar el TP {datos['numero']} en el portal.")
+            elif estado_tp in ("ERROR", None):
+                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
 
     ventana.after(1000, procesar_cola_telegram)
 

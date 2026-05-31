@@ -13,6 +13,8 @@ from telegram.ext import (
 from config import TELEGRAM_TOKEN, AUTHORIZED_USERS
 
 estado_usuario = {}
+MSG_MENU = "Seleccione una opción:\n1: Iniciar TP\n2: Cerrar TP"
+MSG_VOLVER = "\n\nPara volver atrás, escriba *volver* o pulse el botón ↩️ Volver atrás."
 
 # =========================
 # CONFIGURACIÓN
@@ -52,7 +54,7 @@ def intentos_restantes(chat_id: int) -> int:
     return MAX_ERRORES - errores_usuario.get(chat_id, 0)
 
 # =========================
-# TECLADO MENÚ
+# TECLADOS
 # =========================
 MENU_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
@@ -63,7 +65,24 @@ MENU_KEYBOARD = ReplyKeyboardMarkup(
     input_field_placeholder="Seleccione una opción..."
 )
 
+BACK_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton("↩️ Volver atrás")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+    input_field_placeholder="Ingrese el dato o vuelva atrás..."
+)
+
 QUITAR_TECLADO = ReplyKeyboardRemove()
+
+OPCIONES_VOLVER = [
+    "↩️ volver atrás",
+    "volver atrás",
+    "volver",
+    "atras",
+    "atrás"
+]
 
 # =========================
 # MENSAJE DE ERROR DE SISTEMA
@@ -112,8 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     estado_usuario[chat_id] = {"paso": "menu"}
 
     await update.message.reply_text(
-        "👋 Bienvenido al sistema de Control TP Entel.\n\n"
-        "Seleccione una opción:",
+        "👋 Bienvenido al sistema de Control TP Entel.\n\n" + MSG_MENU,
         reply_markup=MENU_KEYBOARD
     )
 
@@ -126,20 +144,68 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-
         chat_id = update.effective_chat.id
         texto = update.message.text.strip()
+        texto_normalizado = texto.lower()
 
         if chat_id not in estado_usuario:
             estado_usuario[chat_id] = {"paso": "menu"}
             await update.message.reply_text(
-                "Seleccione una opción:",
+                MSG_MENU,
                 reply_markup=MENU_KEYBOARD
             )
             return
 
         estado = estado_usuario[chat_id]
         paso = estado["paso"]
+
+        # ── VOLVER ATRÁS ─────────────────────────────────
+        if texto_normalizado in OPCIONES_VOLVER:
+
+            if paso == "numero":
+                estado_usuario[chat_id] = {"paso": "menu"}
+                resetear_errores(chat_id)
+                await update.message.reply_text(
+                    MSG_MENU,
+                    reply_markup=MENU_KEYBOARD
+                )
+                return
+
+            if paso == "nombre":
+                estado["paso"] = "numero"
+                estado.pop("numero", None)
+                resetear_errores(chat_id)
+                await update.message.reply_text(
+                    "Ingrese nuevamente el número de TP:\n"
+                    "_(7 dígitos numéricos. Ejemplo: 1905610)_" + MSG_VOLVER,
+                    parse_mode="Markdown",
+                    reply_markup=BACK_KEYBOARD
+                )
+                return
+
+            if paso == "telefono":
+                estado["paso"] = "nombre"
+                estado.pop("nombre", None)
+                resetear_errores(chat_id)
+                await update.message.reply_text(
+                    "Ingrese nuevamente su nombre y apellido:\n"
+                    "_(Ejemplo: Juan Pérez)_" + MSG_VOLVER,
+                    parse_mode="Markdown",
+                    reply_markup=BACK_KEYBOARD
+                )
+                return
+
+            if paso == "empresa":
+                estado["paso"] = "telefono"
+                estado.pop("telefono", None)
+                resetear_errores(chat_id)
+                await update.message.reply_text(
+                    "Ingrese nuevamente su número de teléfono:\n"
+                    "_(9 dígitos, sin espacios. Ejemplo: 912345678)_" + MSG_VOLVER,
+                    parse_mode="Markdown",
+                    reply_markup=BACK_KEYBOARD
+                )
+                return
 
         # ── MENU ─────────────────────────────────────────
         if paso == "menu":
@@ -151,9 +217,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "📋 *Iniciar TP*\n\n"
                     "Ingrese el número de TP:\n"
-                    "_(7 dígitos numéricos. Ejemplo: 1905610)_",
+                    "_(7 dígitos numéricos. Ejemplo: 1905610)_" + MSG_VOLVER,
                     parse_mode="Markdown",
-                    reply_markup=QUITAR_TECLADO
+                    reply_markup=BACK_KEYBOARD
                 )
 
             elif texto in ["2️⃣ Cerrar TP", "2"]:
@@ -163,9 +229,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "🔒 *Cerrar TP*\n\n"
                     "Ingrese el número de TP:\n"
-                    "_(7 dígitos numéricos. Ejemplo: 1905610)_",
+                    "_(7 dígitos numéricos. Ejemplo: 1905610)_" + MSG_VOLVER,
                     parse_mode="Markdown",
-                    reply_markup=QUITAR_TECLADO
+                    reply_markup=BACK_KEYBOARD
                 )
 
             else:
@@ -204,8 +270,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📌 Debe ser exactamente *7 dígitos numéricos*.\n"
                         f"📌 Ejemplo: 1905610\n\n"
                         f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
-                        f"Ingrese número de TP:",
-                        parse_mode="Markdown"
+                        f"Ingrese número de TP:" + MSG_VOLVER,
+                        parse_mode="Markdown",
+                        reply_markup=BACK_KEYBOARD
                     )
                 return
 
@@ -214,8 +281,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["paso"] = "nombre"
             await update.message.reply_text(
                 "👤 Ingrese su nombre y apellido:\n"
-                "_(Ejemplo: Juan Pérez)_",
-                parse_mode="Markdown"
+                "_(Ejemplo: Juan Pérez)_" + MSG_VOLVER,
+                parse_mode="Markdown",
+                reply_markup=BACK_KEYBOARD
             )
             return
 
@@ -241,8 +309,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📌 Debe ingresar *nombre y apellido*.\n"
                         f"📌 Ejemplo: Juan Pérez\n\n"
                         f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
-                        f"Ingrese su nombre y apellido:",
-                        parse_mode="Markdown"
+                        f"Ingrese su nombre y apellido:" + MSG_VOLVER,
+                        parse_mode="Markdown",
+                        reply_markup=BACK_KEYBOARD
                     )
                 return
 
@@ -251,8 +320,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["paso"] = "telefono"
             await update.message.reply_text(
                 "📱 Ingrese su número de teléfono:\n"
-                "_(9 dígitos, sin espacios. Ejemplo: 912345678)_",
-                parse_mode="Markdown"
+                "_(9 dígitos, sin espacios. Ejemplo: 912345678)_" + MSG_VOLVER,
+                parse_mode="Markdown",
+                reply_markup=BACK_KEYBOARD
             )
             return
 
@@ -274,8 +344,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📌 Debe ser exactamente *9 dígitos numéricos*, sin espacios ni guiones.\n"
                         f"📌 Ejemplo: 912345678\n\n"
                         f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
-                        f"Ingrese su teléfono:",
-                        parse_mode="Markdown"
+                        f"Ingrese su teléfono:" + MSG_VOLVER,
+                        parse_mode="Markdown",
+                        reply_markup=BACK_KEYBOARD
                     )
                 return
 
@@ -316,12 +387,13 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # INICIAR — pedir empresa
             estado["paso"] = "empresa"
             await update.message.reply_text(
-                "🏢 Ingrese el nombre de su empresa:\n",
-                parse_mode="Markdown"
+                "🏢 Ingrese el nombre de su empresa:" + MSG_VOLVER,
+                parse_mode="Markdown",
+                reply_markup=BACK_KEYBOARD
             )
             return
 
-        # ── EMPRESA (solo iniciar) ────────────────────────
+        # ── EMPRESA SOLO INICIAR ─────────────────────────
         if paso == "empresa":
 
             empresa = "" if texto == "-" else texto

@@ -14,7 +14,7 @@ from config import TELEGRAM_TOKEN, AUTHORIZED_USERS
 
 estado_usuario = {}
 MSG_MENU = "Seleccione una opción:\n1: Iniciar TP\n2: Cerrar TP"
-MSG_VOLVER = "\n\nPara volver atrás, escriba *volver* o pulse el botón ↩️ Volver atrás."
+MSG_VOLVER = "\n\nEscriba *volver* o pulse el botón ↩️ Volver atrás."
 
 # =========================
 # CONFIGURACIÓN
@@ -216,8 +216,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 estado["paso"] = "numero"
                 await update.message.reply_text(
                     "📋 *Iniciar TP*\n\n"
-                    "Ingrese el número de TP:\n"
-                    "_(7 dígitos numéricos. Ejemplo: 1905610)_" + MSG_VOLVER,
+                    "Ingrese el número de TP:"
+                    "(Ejemplo: 1905610)_" + MSG_VOLVER,
                     parse_mode="Markdown",
                     reply_markup=BACK_KEYBOARD
                 )
@@ -228,8 +228,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 estado["paso"] = "numero"
                 await update.message.reply_text(
                     "🔒 *Cerrar TP*\n\n"
-                    "Ingrese el número de TP:\n"
-                    "_(7 dígitos numéricos. Ejemplo: 1905610)_" + MSG_VOLVER,
+                    "Ingrese el número de TP:"
+                    "Ejemplo: 1905610)_" + MSG_VOLVER,
                     parse_mode="Markdown",
                     reply_markup=BACK_KEYBOARD
                 )
@@ -267,7 +267,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await update.message.reply_text(
                         f"❌ Número de TP incorrecto.\n\n"
-                        f"📌 Debe ser exactamente *7 dígitos numéricos*.\n"
+                        f"📌 Debe ser exactamente *7 dígitos numéricos*."
                         f"📌 Ejemplo: 1905610\n\n"
                         f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
                         f"Ingrese número de TP:" + MSG_VOLVER,
@@ -305,7 +305,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 else:
                     await update.message.reply_text(
-                        f"❌ Nombre incorrecto.\n\n"
+                        f"❌ Nombre incorrecto.\n"
                         f"📌 Debe ingresar *nombre y apellido*.\n"
                         f"📌 Ejemplo: Juan Pérez\n\n"
                         f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
@@ -319,8 +319,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["nombre"] = texto
             estado["paso"] = "telefono"
             await update.message.reply_text(
-                "📱 Ingrese su número de teléfono:\n"
-                "_(9 dígitos, sin espacios. Ejemplo: 912345678)_" + MSG_VOLVER,
+                "📱 Ingrese su número de teléfono: "
+                "Ejemplo: 912345678)_" + MSG_VOLVER,
                 parse_mode="Markdown",
                 reply_markup=BACK_KEYBOARD
             )

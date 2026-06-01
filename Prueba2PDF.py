@@ -42,12 +42,23 @@ texto_bitacora = ""
 # =====================
 # TELEGRAM
 # =====================
+
+# Chat ID del grupo de administradores
+GROUP_CHAT_ID = -1003951764888
+
 def enviar_mensaje_telegram(chat_id, mensaje):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": chat_id, "text": mensaje})
     except Exception as e:
         print("Error Telegram:", e)
+
+def notificar_grupo(mensaje):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": GROUP_CHAT_ID, "text": mensaje})
+    except Exception as e:
+        print("Error notificacion grupo:", e)
 
 # =====================
 # LOGIN
@@ -489,6 +500,9 @@ def procesar_cola_telegram():
 
         estado_tp = ejecutar_validacion()
 
+        hora = datetime.now().strftime("%H:%M")
+        accion_texto = "INICIAR" if datos["accion"] == "iniciar" else "CERRAR"
+
         MSG_SISTEMA_NO_DISPONIBLE = (
             "⚠️ El sistema no está disponible en este momento.\n\n"
             "Por favor contacte a la oficina al anexo:\n"
@@ -501,59 +515,138 @@ def procesar_cola_telegram():
 
             if estado_tp == "SIN_PDF":
                 enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+                notificar_grupo(
+                    f"⚠️ Solicitud fallida — Sin PDF cargado\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "NO_PDF":
                 enviar_mensaje_telegram(chat_id,
                     f"❌ TP {datos['numero']} no fue encontrado en los PDFs del día.")
+                notificar_grupo(
+                    f"❌ TP no encontrado en PDFs\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "POSPUESTO":
                 enviar_mensaje_telegram(chat_id,
                     f"⚠️ TP {datos['numero']} se encuentra POSPUESTO. No es posible iniciarlo.")
+                notificar_grupo(
+                    f"⚠️ TP POSPUESTO\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "EJECUTADO":
                 enviar_mensaje_telegram(chat_id,
                     f"ℹ️ TP {datos['numero']} ya fue EJECUTADO y cerrado anteriormente.")
+                notificar_grupo(
+                    f"ℹ️ TP ya EJECUTADO\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "EN_EJECUCION":
                 enviar_mensaje_telegram(chat_id,
                     f"⚠️ Estimado {datos['nombre']}, el TP {datos['numero']} ya se encuentra iniciado (EN EJECUCIÓN).")
+                notificar_grupo(
+                    f"⚠️ TP ya EN EJECUCIÓN\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "PLANIFICADO":
                 def run_inicio():
                     ok = iniciar_tp()
                     if ok:
                         exportar_txt()
+                        hora_fin = datetime.now().strftime("%H:%M")
                         enviar_mensaje_telegram(chat_id,
                             f"✅ TP {datos['numero']} iniciado correctamente.\n"
                             f"Operador: {datos['nombre']} | Tel: {datos['telefono']}")
+                        notificar_grupo(
+                            f"✅ TP INICIADO\n"
+                            f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                            f"📋 TP: {datos['numero']}\n"
+                            f"🕐 {hora_fin} hrs"
+                        )
                     else:
                         enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+                        notificar_grupo(
+                            f"❌ Error al iniciar TP\n"
+                            f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                            f"📋 TP: {datos['numero']}\n"
+                            f"🕐 {hora} hrs"
+                        )
                 ventana.after(1500, run_inicio)
 
             elif estado_tp in ("ERROR", None):
                 enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+                notificar_grupo(
+                    f"❌ Error de sistema\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
         # ── CERRAR ───────────────────────────────────────
         else:
 
             if estado_tp == "SIN_PDF":
                 enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+                notificar_grupo(
+                    f"⚠️ Solicitud fallida — Sin PDF cargado\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "NO_PDF":
                 enviar_mensaje_telegram(chat_id,
                     f"❌ TP {datos['numero']} no fue encontrado en los PDFs del día.")
+                notificar_grupo(
+                    f"❌ TP no encontrado en PDFs\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "EJECUTADO":
                 enviar_mensaje_telegram(chat_id,
                     f"ℹ️ TP {datos['numero']} ya fue cerrado anteriormente.")
+                notificar_grupo(
+                    f"ℹ️ TP ya EJECUTADO\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "PLANIFICADO":
                 enviar_mensaje_telegram(chat_id,
                     f"⚠️ TP {datos['numero']} aún no ha sido iniciado. No es posible cerrarlo.")
+                notificar_grupo(
+                    f"⚠️ TP aún no iniciado\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "POSPUESTO":
                 enviar_mensaje_telegram(chat_id,
                     f"⚠️ TP {datos['numero']} se encuentra POSPUESTO.")
+                notificar_grupo(
+                    f"⚠️ TP POSPUESTO\n"
+                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"🕐 {hora} hrs"
+                )
 
             elif estado_tp == "EN_EJECUCION":
                 nombre_cierre = datos["nombre"]
@@ -562,11 +655,24 @@ def procesar_cola_telegram():
                 def run_cierre():
                     ok = finalizar_tp(nombre_cierre, telefono_cierre)
                     if ok:
+                        hora_fin = datetime.now().strftime("%H:%M")
                         enviar_mensaje_telegram(chat_id,
                             f"✅ TP {datos['numero']} finalizado correctamente.\n"
                             f"Operador: {nombre_cierre} | Tel: {telefono_cierre}")
+                        notificar_grupo(
+                            f"🔒 TP CERRADO\n"
+                            f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
+                            f"📋 TP: {datos['numero']}\n"
+                            f"🕐 {hora_fin} hrs"
+                        )
                     else:
                         enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+                        notificar_grupo(
+                            f"❌ Error al cerrar TP\n"
+                            f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
+                            f"📋 TP: {datos['numero']}\n"
+                            f"🕐 {hora} hrs"
+                        )
 
                 ventana.after(1500, run_cierre)
 

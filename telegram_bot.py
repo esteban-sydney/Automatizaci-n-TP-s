@@ -217,7 +217,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "📋 *Iniciar TP*\n\n"
                     "Ingrese el número de TP:"
-                    "(Ejemplo: 1905610)_" + MSG_VOLVER,
+                    "_(Ejemplo: 1905610)_" + MSG_VOLVER,
                     parse_mode="Markdown",
                     reply_markup=BACK_KEYBOARD
                 )
@@ -229,7 +229,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     "🔒 *Cerrar TP*\n\n"
                     "Ingrese el número de TP:"
-                    "Ejemplo: 1905610)_" + MSG_VOLVER,
+                    "_(Ejemplo: 1905610)_" + MSG_VOLVER,
                     parse_mode="Markdown",
                     reply_markup=BACK_KEYBOARD
                 )
@@ -320,7 +320,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["paso"] = "telefono"
             await update.message.reply_text(
                 "📱 Ingrese su número de teléfono: "
-                "Ejemplo: 912345678)_" + MSG_VOLVER,
+                "_Ejemplo: 912345678)_" + MSG_VOLVER,
                 parse_mode="Markdown",
                 reply_markup=BACK_KEYBOARD
             )

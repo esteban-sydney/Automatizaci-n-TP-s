@@ -1,16 +1,21 @@
 print("🔥 BOT FILE LOADED")
-import asyncio
-from datetime import datetime, timedelta
-from Prueba2PDF import cola_telegram
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import (
+import logging  # noqa: E402
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("python-telegram-bot").setLevel(logging.WARNING)
+import asyncio  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+from Prueba2PDF import cola_telegram, buscar_en_pdf, pendientes_wdm  # noqa: E402
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove  # noqa: E402
+from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters
 )
-from config import TELEGRAM_TOKEN, AUTHORIZED_USERS
+from config import TELEGRAM_TOKEN, AUTHORIZED_USERS  # noqa: E402
+
 
 estado_usuario = {}
 MSG_MENU = "Seleccione una opción:\n1: Iniciar TP\n2: Cerrar TP"
@@ -275,6 +280,32 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=BACK_KEYBOARD
                     )
                 return
+            # Validar existencia del TP en los PDFs cargados (UI)
+            try:
+                existe = buscar_en_pdf(texto)
+            except Exception as e:
+                print("ERROR validando PDF:", e)
+                await update.message.reply_text(
+                    MSG_ERROR_SISTEMA,
+                    parse_mode="Markdown"
+                )
+                return
+
+            if not existe:
+                total = registrar_error(chat_id)
+                await update.message.reply_text(
+                    f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n" \
+                    f"Por favor verifique el número o contacte a un operador 22 360 2280. ",
+                    reply_markup=BACK_KEYBOARD
+                )
+                if total >= MAX_ERRORES:
+                    bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                    await update.message.reply_text(
+                        f"🔒 Demasiados intentos incorrectos.\n"
+                        f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
+                        reply_markup=QUITAR_TECLADO
+                    )
+                return
 
             resetear_errores(chat_id)
             estado["numero"] = texto
@@ -378,11 +409,11 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"📤 Cola PUT (cerrar) — tamaño: {cola_telegram.qsize()}")
                 estado_usuario[chat_id] = {"paso": "menu"}
 
-                await update.message.reply_text(
-                    "¿Desea realizar otra operación?",
-                    reply_markup=MENU_KEYBOARD
-                )
-                return
+             #    await update.message.reply_text(
+              #      "¿Desea realizar otra operación?",
+              #      reply_markup=MENU_KEYBOARD
+               # )
+                #return
 
             # INICIAR — pedir empresa
             estado["paso"] = "empresa"
@@ -431,6 +462,76 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # =========================
+# ADMIN COMMANDS
+async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await verificar_usuario(update):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Uso: /aprobar <numero_TP>")
+        return
+
+    numero = args[0].strip()
+    pendiente = pendientes_wdm.pop(numero, None)
+    if not pendiente:
+        await update.message.reply_text(f"No hay solicitud pendiente para TP {numero}.")
+        return
+
+    cola_telegram.put(pendiente)
+    await update.message.reply_text(
+        f"✅ TP {numero} aprobado. Se reenvía para iniciar el proceso automáticamente."
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=pendiente["chat_id"],
+            text=(
+                f"✅ Tu TP {numero} fue aprobado por los administradores.\n"
+                "Se procederá con el inicio. Si hay novedades, te avisaremos aquí."
+            )
+        )
+    except Exception as e:
+        print("ERROR enviando mensaje al usuario aprobado:", e)
+
+async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await verificar_usuario(update):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Uso: /rechazar <numero_TP>")
+        return
+
+    numero = args[0].strip()
+    pendiente = pendientes_wdm.pop(numero, None)
+    if not pendiente:
+        await update.message.reply_text(f"No hay solicitud pendiente para TP {numero}.")
+        return
+
+    await update.message.reply_text(
+        f"❌ TP {numero} rechazado. Se avisó al usuario que debe llamar al anexo."
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=pendiente["chat_id"],
+            text=(
+                f"⚠️ Tu TP {numero} fue revisado y *no fue aprobado* para inicio automático.\n"
+                f"Por favor contacta al anexo: {ANEXO_OFICINA}."
+            ),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print("ERROR enviando mensaje al usuario rechazado:", e)
+
+    notificar_grupo(
+        f"❌ TP {numero} rechazado por administrador.\n"
+        f"👤 {pendiente['nombre']} | 📱 {pendiente['telefono']}\n"
+        f"📋 TP: {numero}"
+    )
+
+# =========================
 # INICIAR BOT
 # =========================
 def iniciar_bot():
@@ -445,6 +546,8 @@ def iniciar_bot():
     print("🔥 app creada")
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("aprobar", aprobar))
+    app.add_handler(CommandHandler("rechazar", rechazar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
     print("BOT ONLINE ✅")

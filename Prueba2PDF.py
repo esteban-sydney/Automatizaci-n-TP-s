@@ -1,15 +1,20 @@
 from queue import Queue
 cola_telegram = Queue()
 
-import tkinter as tk
-from tkinter import messagebox, filedialog, ttk
-from playwright.sync_api import sync_playwright
-from PyPDF2 import PdfReader
-import re
-from datetime import datetime
-import os
-import requests
-from config import TELEGRAM_TOKEN
+import tkinter as tk  # noqa: E402
+from tkinter import messagebox, filedialog, ttk  # noqa: E402
+from playwright.sync_api import sync_playwright  # noqa: E402
+from PyPDF2 import PdfReader  # noqa: E402
+import re  # noqa: E402
+from datetime import datetime  # noqa: E402
+import os  # noqa: E402
+import requests  # noqa: E402
+from config import TELEGRAM_TOKEN  # noqa: E402
+import logging  # noqa: E402
+
+# Logging básico
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 # =====================
 # CONFIGURACIÓN
@@ -39,6 +44,7 @@ tp_iniciado = False
 
 texto_bitacora = ""
 datos_tp_actual = {}
+pendientes_wdm = {}
 
 # =====================
 # TELEGRAM
@@ -132,12 +138,15 @@ def restaurar_sesion():
     try:
         hacer_login()
         messagebox.showinfo("Sesión", "Sesión restaurada correctamente ✅")
-    except:
+    except Exception as e:
+        logger.exception("Error al restaurar sesión: %s", e)
         try:
-            browser.close()
-            playwright_inst.stop()
-        except:
-            pass
+            if browser:
+                browser.close()
+            if playwright_inst:
+                playwright_inst.stop()
+        except Exception as e2:
+            logger.exception("Error cerrando navegador: %s", e2)
         iniciar_navegador()
 
 # =====================
@@ -158,8 +167,8 @@ def buscar_en_pdf(numero):
                     texto += contenido
             if numero in texto:
                 return True
-        except:
-            pass
+        except Exception as e:
+            logger.exception("Error leyendo PDF %s: %s", ruta, e)
 
     return False
 
@@ -181,8 +190,12 @@ def cargar_pdf_2():
 # EXTRACCIÓN DATOS
 # =====================
 def extraer_datos_trabajo():
-    titulo = page.locator("h1").inner_text()
-    numero = re.search(r"\d+", titulo).group()
+    titulo = page.locator("h1").inner_text().strip()
+    m = re.search(r"\d+", titulo)
+    if not m:
+        logger.error("No se encontró número TP en título: %s", titulo)
+        raise ValueError("Número TP no encontrado en título")
+    numero = m.group()
 
     tabla = page.locator("table.sample").first
     fila = tabla.locator("tr").nth(1)
@@ -193,20 +206,23 @@ def extraer_datos_trabajo():
 
     try:
         rpn = int(fila.locator("td").nth(2).inner_text().strip())
-    except:
+    except Exception as e:
+        logger.exception("Error parseando RPN: %s", e)
         rpn = 0
 
     try:
         fecha_raw = fila.locator("td").nth(4).inner_text().strip()
         fecha_obj = datetime.strptime(fecha_raw, "%Y-%m-%d %H:%M:%S")
         fecha_plan = fecha_obj.strftime("%Y-%m-%d")
-    except:
+    except Exception as e:
+        logger.exception("Error parseando fecha: %s", e)
         fecha_plan = "N/A"
 
     estado = fila.locator("td").nth(3).inner_text().strip().upper()
 
     return {
         "numero": numero,
+        "titulo": titulo,
         "descripcion": descripcion,
         "rpn": rpn,
         "fecha_plan": fecha_plan,
@@ -216,11 +232,19 @@ def extraer_datos_trabajo():
 def obtener_aviso_wdm():
     try:
         texto_pagina = page.locator("body").inner_text().upper()
-    except:
+    except Exception as e:
+        logger.exception("Error leyendo página para aviso WDM: %s", e)
         try:
             texto_pagina = page.content().upper()
-        except:
+        except Exception as e2:
+            logger.exception("Error obteniendo contenido de página: %s", e2)
             texto_pagina = ""
+
+    try:
+        titulo = page.locator("h1").inner_text().upper()
+        texto_pagina += " " + titulo
+    except Exception:
+        pass
 
     if "WDM" in texto_pagina:
         return "🔎 WDM: Detectado en la página del TP\n"
@@ -281,7 +305,7 @@ def ejecutar_validacion(event=None):
             fecha_tp = datetime.strptime(datos["fecha_plan"], "%Y-%m-%d").date()
             if fecha_tp < datetime.now().date():
                 color_fecha = "red"
-        except:
+        except:  # noqa: E722
             pass
 
         label_resultado.config(text=f"✅ TP VALIDADO ({estado})", fg="green")
@@ -590,12 +614,31 @@ def procesar_cola_telegram():
 
             elif estado_tp == "PLANIFICADO":
                 if aviso_wdm:
-                    notificar_grupo(
-                        f"⛔ TP NO INICIADO AUTOMÁTICAMENTE — WDM detectado\n"
-                        f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    numero_tp = datos["numero"]
+                    pendientes_wdm[numero_tp] = {
+                        "accion": datos["accion"],
+                        "numero": datos["numero"],
+                        "nombre": datos["nombre"],
+                        "telefono": datos["telefono"],
+                        "empresa": datos.get("empresa", ""),
+                        "chat_id": chat_id
+                    }
+                    admin_msg = (
+                        f"⛔ WDM detectado en TP {numero_tp}\n"
+                        f"📌 Título: {datos_tp_actual.get('titulo', 'N/A')}\n"
+                        f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
+                        f"🔢 RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
+                        f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
+                        f"👤 Solicitante: {datos['nombre']} | 📱 {datos['telefono']}\n"
+                        f"🏢 Empresa: {datos.get('empresa', 'No aplica')}\n"
                         f"{aviso_wdm}"
-                        f"🕐 {hora} hrs"
+                        f"\nAcción requerida: admin use /aprobar {numero_tp} o /rechazar {numero_tp}."
+                    )
+                    notificar_grupo(admin_msg)
+                    enviar_mensaje_telegram(
+                        chat_id,
+                        "⚠️ Se detectó WDM en tu TP. Los administradores fueron notificados y revisarán el caso.\n"
+                        "Si se rechaza, deberás llamar al anexo: 22 360 2280."
                     )
                     ventana.after(1000, procesar_cola_telegram)
                     return

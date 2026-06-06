@@ -38,6 +38,7 @@ tp_validado = False
 tp_iniciado = False
 
 texto_bitacora = ""
+datos_tp_actual = {}
 
 # =====================
 # TELEGRAM
@@ -212,11 +213,25 @@ def extraer_datos_trabajo():
         "estado": estado
     }
 
+def obtener_aviso_wdm():
+    try:
+        texto_pagina = page.locator("body").inner_text().upper()
+    except:
+        try:
+            texto_pagina = page.content().upper()
+        except:
+            texto_pagina = ""
+
+    if "WDM" in texto_pagina:
+        return "🔎 WDM: Detectado en la página del TP\n"
+
+    return ""
+
 # =====================
 # VALIDAR TP — retorna estado string
 # =====================
 def ejecutar_validacion(event=None):
-    global tp_validado
+    global tp_validado, datos_tp_actual
 
     numero = entry_trabajo.get().strip()
 
@@ -237,6 +252,7 @@ def ejecutar_validacion(event=None):
         page.wait_for_timeout(2000)
 
         datos = extraer_datos_trabajo()
+        datos_tp_actual = datos
         estado = datos["estado"]
 
         btn_iniciar.config(state="disabled")
@@ -354,7 +370,6 @@ def iniciar_tp():
         tp_iniciado = True
         btn_iniciar.config(state="disabled")
         btn_finalizar.config(state="normal")
-        messagebox.showinfo("OK", "TP iniciado correctamente ✅")
         return True
 
     except Exception as e:
@@ -467,7 +482,6 @@ def exportar_txt():
             archivo.write(linea)
 
         os.startfile(ruta)
-        messagebox.showinfo("Exportación", "TXT actualizado correctamente ✅")
 
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo exportar:\n{str(e)}")
@@ -502,6 +516,15 @@ def procesar_cola_telegram():
 
         hora = datetime.now().strftime("%H:%M")
         accion_texto = "INICIAR" if datos["accion"] == "iniciar" else "CERRAR"
+        aviso_wdm = ""
+
+        if estado_tp not in ("SIN_PDF", "NO_PDF", None):
+            aviso_wdm = obtener_aviso_wdm()
+            if aviso_wdm:
+                enviar_mensaje_telegram(
+                    chat_id,
+                    "TP requiere ser iniciado llamando al número de transporte"
+                )
 
         MSG_SISTEMA_NO_DISPONIBLE = (
             "⚠️ El sistema no está disponible en este momento.\n\n"
@@ -539,6 +562,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP POSPUESTO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -549,6 +573,7 @@ def procesar_cola_telegram():
                     f"ℹ️ TP ya EJECUTADO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -559,22 +584,34 @@ def procesar_cola_telegram():
                     f"⚠️ TP ya EN EJECUCIÓN\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
             elif estado_tp == "PLANIFICADO":
+                if aviso_wdm:
+                    notificar_grupo(
+                        f"⛔ TP NO INICIADO AUTOMÁTICAMENTE — WDM detectado\n"
+                        f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
+                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                        f"{aviso_wdm}"
+                        f"🕐 {hora} hrs"
+                    )
+                    ventana.after(1000, procesar_cola_telegram)
+                    return
+
                 def run_inicio():
                     ok = iniciar_tp()
                     if ok:
                         exportar_txt()
                         hora_fin = datetime.now().strftime("%H:%M")
-                        enviar_mensaje_telegram(chat_id,
-                            f"✅ TP {datos['numero']} iniciado correctamente.\n"
-                            f"Operador: {datos['nombre']} | Tel: {datos['telefono']}")
+                        enviar_mensaje_telegram(chat_id, "TP iniciado.")
                         notificar_grupo(
                             f"✅ TP INICIADO\n"
                             f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                             f"📋 TP: {datos['numero']}\n"
+                            f"RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
+                            f"{aviso_wdm}"
                             f"🕐 {hora_fin} hrs"
                         )
                     else:
@@ -583,6 +620,7 @@ def procesar_cola_telegram():
                             f"❌ Error al iniciar TP\n"
                             f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                             f"📋 TP: {datos['numero']}\n"
+                            f"{aviso_wdm}"
                             f"🕐 {hora} hrs"
                         )
                 ventana.after(1500, run_inicio)
@@ -593,6 +631,7 @@ def procesar_cola_telegram():
                     f"❌ Error de sistema\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -625,6 +664,7 @@ def procesar_cola_telegram():
                     f"ℹ️ TP ya EJECUTADO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -635,6 +675,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP aún no iniciado\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -645,6 +686,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP POSPUESTO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                    f"{aviso_wdm}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -663,6 +705,7 @@ def procesar_cola_telegram():
                             f"🔒 TP CERRADO\n"
                             f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
                             f"📋 TP: {datos['numero']}\n"
+                            f"{aviso_wdm}"
                             f"🕐 {hora_fin} hrs"
                         )
                     else:
@@ -671,6 +714,7 @@ def procesar_cola_telegram():
                             f"❌ Error al cerrar TP\n"
                             f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
                             f"📋 TP: {datos['numero']}\n"
+                            f"{aviso_wdm}"
                             f"🕐 {hora} hrs"
                         )
 

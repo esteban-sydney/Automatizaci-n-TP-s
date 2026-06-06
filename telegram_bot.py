@@ -423,11 +423,6 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"📤 Cola PUT (iniciar) — tamaño: {cola_telegram.qsize()}")
             estado_usuario[chat_id] = {"paso": "menu"}
 
-            await update.message.reply_text(
-                "¿Desea realizar otra operación?",
-                reply_markup=MENU_KEYBOARD
-            )
-
     except Exception as e:
         print("ERROR BOT:", e)
         await update.message.reply_text(

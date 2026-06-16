@@ -189,6 +189,42 @@ def cargar_pdf_2():
 # =====================
 # EXTRACCIÓN DATOS
 # =====================
+def extraer_valor_por_encabezado(nombre_encabezado):
+    try:
+        return page.evaluate(
+            """(nombre) => {
+                const limpiar = (txt) => (txt || '').replace(/\\s+/g, ' ').trim();
+                const normalizar = (txt) => limpiar(txt).toLowerCase();
+                const objetivo = normalizar(nombre);
+
+                for (const tabla of Array.from(document.querySelectorAll('table'))) {
+                    const filas = Array.from(tabla.querySelectorAll('tr')).map((fila) =>
+                        Array.from(fila.querySelectorAll('th,td')).map((celda) => limpiar(celda.innerText))
+                    );
+
+                    for (let f = 0; f < filas.length; f++) {
+                        for (let c = 0; c < filas[f].length; c++) {
+                            if (normalizar(filas[f][c]) === objetivo) {
+                                for (let siguiente = f + 1; siguiente < filas.length; siguiente++) {
+                                    const valor = filas[siguiente][c];
+                                    if (valor) return valor;
+                                }
+
+                                const valorDerecha = filas[f][c + 1];
+                                if (valorDerecha) return valorDerecha;
+                            }
+                        }
+                    }
+                }
+
+                return 'N/A';
+            }""",
+            nombre_encabezado
+        )
+    except Exception as e:
+        logger.exception("Error extrayendo encabezado %s: %s", nombre_encabezado, e)
+        return "N/A"
+
 def extraer_datos_trabajo():
     titulo = page.locator("h1").inner_text().strip()
     m = re.search(r"\d+", titulo)
@@ -219,6 +255,7 @@ def extraer_datos_trabajo():
         fecha_plan = "N/A"
 
     estado = fila.locator("td").nth(3).inner_text().strip().upper()
+    lugar = extraer_valor_por_encabezado("Lugar")
 
     return {
         "numero": numero,
@@ -226,8 +263,15 @@ def extraer_datos_trabajo():
         "descripcion": descripcion,
         "rpn": rpn,
         "fecha_plan": fecha_plan,
-        "estado": estado
+        "estado": estado,
+        "lugar": lugar
     }
+
+def obtener_aviso_lugar():
+    lugar = datos_tp_actual.get("lugar", "N/A")
+    if lugar and lugar != "N/A":
+        return f"📍 Lugar: {lugar}\n"
+    return "📍 Lugar: No encontrado\n"
 
 def obtener_aviso_wdm():
     try:
@@ -541,9 +585,11 @@ def procesar_cola_telegram():
         hora = datetime.now().strftime("%H:%M")
         accion_texto = "INICIAR" if datos["accion"] == "iniciar" else "CERRAR"
         aviso_wdm = ""
+        aviso_lugar = ""
 
         if estado_tp not in ("SIN_PDF", "NO_PDF", None):
             aviso_wdm = obtener_aviso_wdm()
+            aviso_lugar = obtener_aviso_lugar()
             if aviso_wdm:
                 enviar_mensaje_telegram(
                     chat_id,
@@ -586,7 +632,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP POSPUESTO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -597,7 +643,7 @@ def procesar_cola_telegram():
                     f"ℹ️ TP ya EJECUTADO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -608,7 +654,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP ya EN EJECUCIÓN\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -631,7 +677,7 @@ def procesar_cola_telegram():
                         f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
                         f"👤 Solicitante: {datos['nombre']} | 📱 {datos['telefono']}\n"
                         f"🏢 Empresa: {datos.get('empresa', 'No aplica')}\n"
-                        f"{aviso_wdm}"
+                        f"{aviso_wdm}{aviso_lugar}"
                         f"\nAcción requerida: admin use /aprobar {numero_tp} o /rechazar {numero_tp}."
                     )
                     notificar_grupo(admin_msg)
@@ -654,7 +700,7 @@ def procesar_cola_telegram():
                             f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                             f"📋 TP: {datos['numero']}\n"
                             f"RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                            f"{aviso_wdm}"
+                            f"{aviso_wdm}{aviso_lugar}"
                             f"🕐 {hora_fin} hrs"
                         )
                     else:
@@ -663,7 +709,7 @@ def procesar_cola_telegram():
                             f"❌ Error al iniciar TP\n"
                             f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                             f"📋 TP: {datos['numero']}\n"
-                            f"{aviso_wdm}"
+                            f"{aviso_wdm}{aviso_lugar}"
                             f"🕐 {hora} hrs"
                         )
                 ventana.after(1500, run_inicio)
@@ -674,7 +720,7 @@ def procesar_cola_telegram():
                     f"❌ Error de sistema\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -707,7 +753,7 @@ def procesar_cola_telegram():
                     f"ℹ️ TP ya EJECUTADO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -718,7 +764,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP aún no iniciado\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -729,7 +775,7 @@ def procesar_cola_telegram():
                     f"⚠️ TP POSPUESTO\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
                     f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}"
+                    f"{aviso_wdm}{aviso_lugar}"
                     f"🕐 {hora} hrs"
                 )
 
@@ -748,7 +794,7 @@ def procesar_cola_telegram():
                             f"🔒 TP CERRADO\n"
                             f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
                             f"📋 TP: {datos['numero']}\n"
-                            f"{aviso_wdm}"
+                            f"{aviso_wdm}{aviso_lugar}"
                             f"🕐 {hora_fin} hrs"
                         )
                     else:
@@ -757,7 +803,7 @@ def procesar_cola_telegram():
                             f"❌ Error al cerrar TP\n"
                             f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
                             f"📋 TP: {datos['numero']}\n"
-                            f"{aviso_wdm}"
+                            f"{aviso_wdm}{aviso_lugar}"
                             f"🕐 {hora} hrs"
                         )
 

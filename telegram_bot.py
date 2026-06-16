@@ -18,7 +18,13 @@ from config import TELEGRAM_TOKEN, AUTHORIZED_USERS  # noqa: E402
 
 
 estado_usuario = {}
-MSG_MENU = "Seleccione una opción:\n1: Iniciar TP\n2: Cerrar TP"
+MSG_MENU = (
+    "Gestor de TP NOC Transporte, favor recordar que trabajo a iniciar NO debe tener afectación de servicio, "
+    "de ser así, llamar al anexo de Transporte.\n\n"
+    "Seleccione una opción:\n"
+    "1: Iniciar TP\n"
+    "2: Cerrar TP"
+)
 MSG_VOLVER = "\n\nEscriba *volver* o pulse el botón ↩️ Volver atrás."
 
 # =========================
@@ -164,6 +170,12 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         estado = estado_usuario[chat_id]
         paso = estado["paso"]
 
+        if paso == "prevalidando":
+            await update.message.reply_text(
+                "⏳ El TP se está validando. Por favor espere un momento."
+            )
+            return
+
         # ── VOLVER ATRÁS ─────────────────────────────────
         if texto_normalizado in OPCIONES_VOLVER:
 
@@ -206,7 +218,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 resetear_errores(chat_id)
                 await update.message.reply_text(
                     "Ingrese nuevamente su número de teléfono:\n"
-                    "_(9 dígitos, sin espacios. Ejemplo: 912345678)_" + MSG_VOLVER,
+                    "_(Puede ingresar el número o contacto que corresponda)_" + MSG_VOLVER,
                     parse_mode="Markdown",
                     reply_markup=BACK_KEYBOARD
                 )
@@ -309,12 +321,16 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             resetear_errores(chat_id)
             estado["numero"] = texto
-            estado["paso"] = "nombre"
+            estado["paso"] = "prevalidando"
+            cola_telegram.put({
+                "tipo": "prevalidar",
+                "accion": estado["accion"],
+                "numero": texto,
+                "chat_id": chat_id,
+                "estado_ref": estado
+            })
             await update.message.reply_text(
-                "👤 Ingrese su nombre y apellido:\n"
-                "_(Ejemplo: Juan Pérez)_" + MSG_VOLVER,
-                parse_mode="Markdown",
-                reply_markup=BACK_KEYBOARD
+                f"⏳ Validando TP {texto}. Espere un momento..."
             )
             return
 
@@ -351,7 +367,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["paso"] = "telefono"
             await update.message.reply_text(
                 "📱 Ingrese su número de teléfono: "
-                "_Ejemplo: 912345678)_" + MSG_VOLVER,
+                "_Puede ingresar el número o contacto que corresponda_" + MSG_VOLVER,
                 parse_mode="Markdown",
                 reply_markup=BACK_KEYBOARD
             )
@@ -359,63 +375,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ── TELEFONO ─────────────────────────────────────
         if paso == "telefono":
-
-            if not texto.isdigit() or len(texto) != 9:
-                total = registrar_error(chat_id)
-
-                if total >= MAX_ERRORES:
-                    bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
-                    await update.message.reply_text(
-                        f"🔒 Demasiados intentos incorrectos.\n"
-                        f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos."
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"❌ Teléfono incorrecto.\n\n"
-                        f"📌 Debe ser exactamente *9 dígitos numéricos*, sin espacios ni guiones.\n"
-                        f"📌 Ejemplo: 912345678\n\n"
-                        f"⚠️ {intentos_restantes(chat_id)} intentos restantes.\n\n"
-                        f"Ingrese su teléfono:" + MSG_VOLVER,
-                        parse_mode="Markdown",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                return
-
             resetear_errores(chat_id)
             estado["telefono"] = texto
 
-            # CERRAR — listo con 3 datos
-            if estado["accion"] == "cerrar":
-
-                resumen = (
-                    f"📋 *Resumen cierre:*\n"
-                    f"• TP: {estado['numero']}\n"
-                    f"• Nombre: {estado['nombre']}\n"
-                    f"• Teléfono: {estado['telefono']}\n\n"
-                    f"⏳ Procesando..."
-                )
-
-                await update.message.reply_text(resumen, parse_mode="Markdown")
-
-                cola_telegram.put({
-                    "accion": "cerrar",
-                    "numero": estado["numero"],
-                    "nombre": estado["nombre"],
-                    "telefono": estado["telefono"],
-                    "empresa": "",
-                    "chat_id": chat_id
-                })
-
-                print(f"📤 Cola PUT (cerrar) — tamaño: {cola_telegram.qsize()}")
-                estado_usuario[chat_id] = {"paso": "menu"}
-
-             #    await update.message.reply_text(
-              #      "¿Desea realizar otra operación?",
-              #      reply_markup=MENU_KEYBOARD
-               # )
-                #return
-
-            # INICIAR — pedir empresa
             estado["paso"] = "empresa"
             await update.message.reply_text(
                 "🏢 Ingrese el nombre de su empresa:" + MSG_VOLVER,
@@ -424,15 +386,17 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # ── EMPRESA SOLO INICIAR ─────────────────────────
+        # ── EMPRESA ──────────────────────────────────────
         if paso == "empresa":
 
             empresa = "" if texto == "-" else texto
             estado["empresa"] = empresa
             estado["paso"] = "menu"
+            accion = estado["accion"]
+            titulo_resumen = "inicio" if accion == "iniciar" else "cierre"
 
             resumen = (
-                f"📋 *Resumen inicio:*\n"
+                f"📋 *Resumen {titulo_resumen}:*\n"
                 f"• TP: {estado['numero']}\n"
                 f"• Nombre: {estado['nombre']}\n"
                 f"• Teléfono: {estado['telefono']}\n"
@@ -443,7 +407,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(resumen, parse_mode="Markdown")
 
             cola_telegram.put({
-                "accion": "iniciar",
+                "accion": accion,
                 "numero": estado["numero"],
                 "nombre": estado["nombre"],
                 "telefono": estado["telefono"],
@@ -451,7 +415,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "chat_id": chat_id
             })
 
-            print(f"📤 Cola PUT (iniciar) — tamaño: {cola_telegram.qsize()}")
+            print(f"📤 Cola PUT ({accion}) — tamaño: {cola_telegram.qsize()}")
             estado_usuario[chat_id] = {"paso": "menu"}
 
     except Exception as e:

@@ -1,5 +1,14 @@
 from queue import Queue
+import threading
+
 cola_telegram = Queue()
+cola_estado_tp = Queue()
+
+class EstadoValidationRequest:
+    def __init__(self, numero):
+        self.numero = numero
+        self.event = threading.Event()
+        self.result = None
 
 import tkinter as tk  # noqa: E402
 from tkinter import messagebox, filedialog, ttk  # noqa: E402
@@ -9,6 +18,7 @@ import re  # noqa: E402
 from datetime import datetime  # noqa: E402
 import os  # noqa: E402
 import requests  # noqa: E402
+import unicodedata  # noqa: E402
 from config import TELEGRAM_TOKEN  # noqa: E402
 import logging  # noqa: E402
 
@@ -172,6 +182,66 @@ def buscar_en_pdf(numero):
 
     return False
 
+
+def normalizar_texto(texto):
+    if texto is None:
+        return ""
+
+    texto = str(texto).strip().upper()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = re.sub(r"\s+", " ", texto)
+    return texto
+
+
+def validar_estado_tp_local(numero):
+    """Valida el estado del TP en el hilo de UI donde está la sesión Playwright."""
+    if not buscar_en_pdf(numero):
+        return {"estado": "NO_PDF"}
+
+    if page is None:
+        logger.error("No hay sesión de navegador activa para validar estado TP")
+        return {"estado": "ERROR_SESION"}
+
+    try:
+        page.goto(sitio["post_login_url"] + numero)
+        page.wait_for_load_state("networkidle", timeout=5000)
+        page.wait_for_selector("h1", timeout=5000)
+        datos = extraer_datos_trabajo()
+        return {
+            "estado": normalizar_texto(datos.get("estado", "ERROR")),
+            "descripcion": datos.get("descripcion", ""),
+            "rpn": datos.get("rpn", ""),
+            "lugar": datos.get("lugar", ""),
+            "titulo": datos.get("titulo", "")
+        }
+    except Exception as e:
+        logger.exception("Error validando estado TP %s: %s", numero, e)
+        return {"estado": "ERROR"}
+
+
+def validar_estado_tp(numero, timeout=15):
+    """Encola la validación para que la ejecute el hilo de UI."""
+    if page is None:
+        return {"estado": "ERROR_SESION"}
+
+    request = EstadoValidationRequest(numero)
+    cola_estado_tp.put(request)
+
+    if not request.event.wait(timeout):
+        logger.error("Timeout esperando validación de estado TP %s", numero)
+        return {"estado": "ERROR"}
+
+    return request.result or {"estado": "ERROR"}
+
+
+def procesar_validacion_estado():
+    while not cola_estado_tp.empty():
+        request = cola_estado_tp.get()
+        request.result = validar_estado_tp_local(request.numero)
+        request.event.set()
+
+
 def cargar_pdf_1():
     global ruta_pdf_1
     archivo = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
@@ -267,11 +337,11 @@ def extraer_datos_trabajo():
         "lugar": lugar
     }
 
-def obtener_aviso_lugar():
+"""def obtener_aviso_lugar():
     lugar = datos_tp_actual.get("lugar", "N/A")
     if lugar and lugar != "N/A":
         return f"📍 Lugar: {lugar}\n"
-    return "📍 Lugar: No encontrado\n"
+    return "📍 Lugar: No encontrado\n""""
 
 def obtener_aviso_wdm():
     try:
@@ -560,6 +630,8 @@ def exportar_txt():
 def procesar_cola_telegram():
     global tp_validado
 
+    procesar_validacion_estado()
+
     if not cola_telegram.empty():
 
         datos = cola_telegram.get()
@@ -589,7 +661,7 @@ def procesar_cola_telegram():
 
         if estado_tp not in ("SIN_PDF", "NO_PDF", None):
             aviso_wdm = obtener_aviso_wdm()
-            aviso_lugar = obtener_aviso_lugar()
+           # aviso_lugar = obtener_aviso_lugar()
             if aviso_wdm:
                 enviar_mensaje_telegram(
                     chat_id,

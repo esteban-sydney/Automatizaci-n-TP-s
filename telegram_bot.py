@@ -5,7 +5,7 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("python-telegram-bot").setLevel(logging.WARNING)
 import asyncio  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
-from Prueba2PDF import cola_telegram, buscar_en_pdf, pendientes_wdm  # noqa: E402
+from Prueba2PDF import cola_telegram, buscar_en_pdf, pendientes_wdm, validar_estado_tp  # noqa: E402
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove  # noqa: E402
 from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
@@ -57,6 +57,17 @@ def tiempo_restante(chat_id: int) -> str:
 
 def intentos_restantes(chat_id: int) -> int:
     return MAX_ERRORES - errores_usuario.get(chat_id, 0)
+
+
+def construir_mensaje_tp_validado(numero: str, descripcion: str) -> str:
+    mensaje = f"✅ TP {numero} validado correctamente."
+    if descripcion:
+        mensaje += f"\n\n📄 Descripción:\n{descripcion.strip()}"
+    mensaje += (
+        "\n\n👤 Ingrese su nombre y apellido:\n"
+        "(Ejemplo: Juan Pérez)" + MSG_VOLVER
+    )
+    return mensaje
 
 # =========================
 # TECLADOS
@@ -307,13 +318,109 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
+            estado_info = validar_estado_tp(texto)
+            estado_plataforma = str(estado_info.get("estado", "ERROR")).upper()
+            descripcion_tp = str(estado_info.get("descripcion", "")).strip()
+
+            if estado.get("accion") == "cerrar":
+                if estado_plataforma == "ERROR_SESION":
+                    await update.message.reply_text(
+                        "⚠️ No hay sesión de navegador activa para validar el TP. "
+                        "Asegúrese de que la UI del operador esté abierta y la sesión PSG activa.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "ERROR":
+                    await update.message.reply_text(
+                        "⚠️ No se pudo validar el estado del TP en la plataforma. "
+                        "Por favor inténtelo nuevamente más tarde.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "NO_PDF":
+                    total = registrar_error(chat_id)
+                    await update.message.reply_text(
+                        f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n"
+                        f"Por favor verifique el número o contacte a un operador 22 360 2280.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    if total >= MAX_ERRORES:
+                        bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                        await update.message.reply_text(
+                            f"🔒 Demasiados intentos incorrectos.\n"
+                            f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
+                            reply_markup=QUITAR_TECLADO
+                        )
+                    return
+
+                estado_plataforma_sin_espacios = estado_plataforma.replace(" ", "")
+
+                if "EJECUTADO" in estado_plataforma_sin_espacios:
+                    await update.message.reply_text(
+                        f"⚠️ El TP {texto} ya fue ejecutado y no puede cerrarse. "
+                        "Verifique el número o consulte con un operador.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if "EJECUCION" not in estado_plataforma_sin_espacios:
+                    await update.message.reply_text(
+                        f"⚠️ El TP {texto} no está en estado EN EJECUCIÓN. "
+                        f"Estado actual: {estado_plataforma}.\n\n"
+                        "Solo los TP en EN EJECUCIÓN pueden cerrarse.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+            if estado.get("accion") == "iniciar":
+                if estado_plataforma == "ERROR_SESION":
+                    await update.message.reply_text(
+                        "⚠️ No hay sesión de navegador activa para validar el TP. "
+                        "Asegúrese de que la UI del operador esté abierta y la sesión PSG activa.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "ERROR":
+                    await update.message.reply_text(
+                        "⚠️ No se pudo validar el estado del TP en la plataforma. "
+                        "Por favor inténtelo nuevamente más tarde.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "NO_PDF":
+                    total = registrar_error(chat_id)
+                    await update.message.reply_text(
+                        f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n"
+                        f"Por favor verifique el número o contacte a un operador 22 360 2280.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    if total >= MAX_ERRORES:
+                        bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                        await update.message.reply_text(
+                            f"🔒 Demasiados intentos incorrectos.\n"
+                            f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
+                            reply_markup=QUITAR_TECLADO
+                        )
+                    return
+
+                if estado_plataforma != "PLANIFICADO":
+                    await update.message.reply_text(
+                        f"⚠️ El TP {texto} no puede iniciarse. "
+                        f"Estado actual: {estado_plataforma}.\n\n"
+                        "Solo los TP en PLANIFICADO pueden iniciarse.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
             resetear_errores(chat_id)
             estado["numero"] = texto
             estado["paso"] = "nombre"
             await update.message.reply_text(
-                "👤 Ingrese su nombre y apellido:\n"
-                "_(Ejemplo: Juan Pérez)_" + MSG_VOLVER,
-                parse_mode="Markdown",
+                construir_mensaje_tp_validado(texto, descripcion_tp),
                 reply_markup=BACK_KEYBOARD
             )
             return
@@ -408,14 +515,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 print(f"📤 Cola PUT (cerrar) — tamaño: {cola_telegram.qsize()}")
                 estado_usuario[chat_id] = {"paso": "menu"}
-
-             #    await update.message.reply_text(
-              #      "¿Desea realizar otra operación?",
-              #      reply_markup=MENU_KEYBOARD
-               # )
-                #return
-
-            # INICIAR — pedir empresa
+                return
             estado["paso"] = "empresa"
             await update.message.reply_text(
                 "🏢 Ingrese el nombre de su empresa:" + MSG_VOLVER,

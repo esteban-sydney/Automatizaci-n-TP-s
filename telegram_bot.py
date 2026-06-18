@@ -364,6 +364,104 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
+            estado_info = validar_estado_tp(texto)
+            estado_plataforma = str(estado_info.get("estado", "ERROR")).upper()
+            descripcion_tp = str(estado_info.get("descripcion", "")).strip()
+
+            if estado.get("accion") == "cerrar":
+                if estado_plataforma == "ERROR_SESION":
+                    await update.message.reply_text(
+                        "⚠️ No hay sesión de navegador activa para validar el TP. "
+                        "Asegúrese de que la UI del operador esté abierta y la sesión PSG activa.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "ERROR":
+                    await update.message.reply_text(
+                        "⚠️ No se pudo validar el estado del TP en la plataforma. "
+                        "Por favor inténtelo nuevamente más tarde.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "NO_PDF":
+                    total = registrar_error(chat_id)
+                    await update.message.reply_text(
+                        f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n"
+                        f"Por favor verifique el número o contacte a un operador 22 360 2280.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    if total >= MAX_ERRORES:
+                        bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                        await update.message.reply_text(
+                            f"🔒 Demasiados intentos incorrectos.\n"
+                            f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
+                            reply_markup=QUITAR_TECLADO
+                        )
+                    return
+
+                estado_plataforma_sin_espacios = estado_plataforma.replace(" ", "")
+
+                if "EJECUTADO" in estado_plataforma_sin_espacios:
+                    await update.message.reply_text(
+                        f"⚠️ El TP {texto} ya fue ejecutado y no puede cerrarse. "
+                        "Verifique el número o consulte con un operador.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if "EJECUCION" not in estado_plataforma_sin_espacios:
+                    await update.message.reply_text(
+                        f"⚠️ El TP {texto} no está en estado EN EJECUCIÓN. "
+                        f"Estado actual: {estado_plataforma}.\n\n"
+                        "Solo los TP en EN EJECUCIÓN pueden cerrarse.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+            if estado.get("accion") == "iniciar":
+                if estado_plataforma == "ERROR_SESION":
+                    await update.message.reply_text(
+                        "⚠️ No hay sesión de navegador activa para validar el TP. "
+                        "Asegúrese de que la UI del operador esté abierta y la sesión PSG activa.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "ERROR":
+                    await update.message.reply_text(
+                        "⚠️ No se pudo validar el estado del TP en la plataforma. "
+                        "Por favor inténtelo nuevamente más tarde.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
+                if estado_plataforma == "NO_PDF":
+                    total = registrar_error(chat_id)
+                    await update.message.reply_text(
+                        f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n"
+                        f"Por favor verifique el número o contacte a un operador 22 360 2280.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    if total >= MAX_ERRORES:
+                        bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
+                        await update.message.reply_text(
+                            f"🔒 Demasiados intentos incorrectos.\n"
+                            f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
+                            reply_markup=QUITAR_TECLADO
+                        )
+                    return
+
+                if estado_plataforma != "PLANIFICADO":
+                    await update.message.reply_text(
+                        f"⚠️ El TP {texto} no puede iniciarse. "
+                        f"Estado actual: {estado_plataforma}.\n\n"
+                        "Solo los TP en PLANIFICADO pueden iniciarse.",
+                        reply_markup=BACK_KEYBOARD
+                    )
+                    return
+
             resetear_errores(chat_id)
             estado["numero"] = texto
             estado["paso"] = "prevalidando"

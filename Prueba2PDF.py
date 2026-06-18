@@ -45,6 +45,7 @@ tp_iniciado = False
 texto_bitacora = ""
 datos_tp_actual = {}
 pendientes_wdm = {}
+pendientes_aprobacion = {}
 
 # =====================
 # TELEGRAM
@@ -52,6 +53,7 @@ pendientes_wdm = {}
 
 # Chat ID del grupo de administradores
 GROUP_CHAT_ID = -1003951764888
+ANEXO_TRANSPORTE = "22 360 2288"
 
 def enviar_mensaje_telegram(chat_id, mensaje, reply_markup=None):
     try:
@@ -77,6 +79,28 @@ def notificar_grupo(mensaje):
         requests.post(url, json={"chat_id": GROUP_CHAT_ID, "text": mensaje})
     except Exception as e:
         print("Error notificacion grupo:", e)
+
+def crear_solicitud_aprobacion(datos):
+    prefijo = "INI" if datos["accion"] == "iniciar" else "CIE"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_id = f"{prefijo}-{datos['numero']}-{timestamp}"
+    solicitud_id = base_id
+    correlativo = 2
+    while solicitud_id in pendientes_aprobacion:
+        solicitud_id = f"{base_id}-{correlativo}"
+        correlativo += 1
+
+    pendientes_aprobacion[solicitud_id] = {
+        "accion": datos["accion"],
+        "numero": datos["numero"],
+        "nombre": datos["nombre"],
+        "telefono": datos["telefono"],
+        "empresa": datos.get("empresa", ""),
+        "chat_id": datos["chat_id"],
+        "estado_ref": datos.get("estado_ref"),
+        "solicitud_id": solicitud_id
+    }
+    return solicitud_id
 
 def teclado_menu_telegram():
     return {
@@ -232,10 +256,13 @@ def extraer_valor_por_encabezado(nombre_encabezado):
                     for (let f = 0; f < filas.length; f++) {
                         for (let c = 0; c < filas[f].length; c++) {
                             if (normalizar(filas[f][c]) === objetivo) {
+                                const valores = [];
                                 for (let siguiente = f + 1; siguiente < filas.length; siguiente++) {
                                     const valor = filas[siguiente][c];
-                                    if (valor) return valor;
+                                    if (valor && !valores.includes(valor)) valores.push(valor);
                                 }
+
+                                if (valores.length) return valores.join(' | ');
 
                                 const valorDerecha = filas[f][c + 1];
                                 if (valorDerecha) return valorDerecha;
@@ -314,10 +341,12 @@ def rpn_es_2500():
 
 def lugar_es_sitios():
     lugar = datos_tp_actual.get("lugar", "")
-    return lugar.strip().upper() == "SITIOS"
+    lugares = [valor.strip().upper() for valor in lugar.split("|")]
+    return "SITIOS" in lugares
 
 PALABRAS_BLOQUEO_TP = [
     "WDM",
+    "RTN",
     "SATELITAL",
     "MHL3000",
     "OSN1800",
@@ -660,7 +689,7 @@ def responder_prevalidacion_telegram(datos):
         volver_menu(
             "⚠️ El sistema no está disponible en este momento.\n\n"
             "No hay PDFs cargados para validar el TP.\n"
-            "Por favor contacte a la oficina al anexo: 22 360 2280"
+            f"Por favor contacte a la oficina al anexo: {ANEXO_TRANSPORTE}"
         )
         return
 
@@ -671,7 +700,7 @@ def responder_prevalidacion_telegram(datos):
     if estado_tp in ("ERROR", None):
         volver_menu(
             "⚠️ El sistema no está disponible en este momento.\n\n"
-            "Por favor contacte a la oficina al anexo: 22 360 2280"
+            f"Por favor contacte a la oficina al anexo: {ANEXO_TRANSPORTE}"
         )
         return
 
@@ -681,7 +710,7 @@ def responder_prevalidacion_telegram(datos):
             return
 
         if estado_tp == "EN_GESTION":
-            volver_menu("TP requiere ser iniciado llamando al número de transporte")
+            volver_menu(f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}")
             return
 
         if estado_tp == "EJECUTADO":
@@ -694,17 +723,13 @@ def responder_prevalidacion_telegram(datos):
 
         if estado_tp == "PLANIFICADO":
             if aviso_wdm or lugar_es_sitios() or rpn_es_2500():
-                detalle = f"\n\n{aviso_wdm}{aviso_lugar}{aviso_rpn}".strip()
                 volver_menu(
-                    "TP requiere ser iniciado llamando al número de transporte"
-                    + (f"\n\n{detalle}" if detalle else "")
+                    f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}"
                 )
                 return
 
             continuar_flujo(
                 f"✅ TP {numero_tp} validado correctamente.\n"
-                f"{aviso_lugar}"
-                f"{aviso_rpn_general}"
                 "\n👤 Ingrese su nombre y apellido:\n"
                 "(Ejemplo: Juan Pérez)\n\n"
                 "Escriba volver o pulse el botón ↩️ Volver atrás."
@@ -714,17 +739,13 @@ def responder_prevalidacion_telegram(datos):
     if accion == "cerrar":
         if estado_tp == "EN_EJECUCION":
             if aviso_wdm or lugar_es_sitios() or rpn_es_2500():
-                detalle = f"\n\n{aviso_wdm}{aviso_lugar}{aviso_rpn}".strip()
                 volver_menu(
-                    "TP requiere ser cerrado llamando al número de transporte"
-                    + (f"\n\n{detalle}" if detalle else "")
+                    f"TP requiere ser cerrado llamando al número de transporte: {ANEXO_TRANSPORTE}"
                 )
                 return
 
             continuar_flujo(
                 f"✅ TP {numero_tp} validado para cierre.\n"
-                f"{aviso_lugar}"
-                f"{aviso_rpn_general}"
                 "\n👤 Ingrese su nombre y apellido:\n"
                 "(Ejemplo: Juan Pérez)\n\n"
                 "Escriba volver o pulse el botón ↩️ Volver atrás."
@@ -744,7 +765,7 @@ def responder_prevalidacion_telegram(datos):
             return
 
         if estado_tp == "EN_GESTION":
-            volver_menu("TP requiere ser gestionado llamando al número de transporte")
+            volver_menu(f"TP requiere ser gestionado llamando al número de transporte: {ANEXO_TRANSPORTE}")
             return
 
     volver_menu(f"⚠️ TP {numero_tp} no se encuentra en un estado válido para esta operación.")
@@ -793,7 +814,7 @@ def procesar_cola_telegram():
         MSG_SISTEMA_NO_DISPONIBLE = (
             "⚠️ El sistema no está disponible en este momento.\n\n"
             "Por favor contacte a la oficina al anexo:\n"
-            "📞 22 360 2280\n\n"
+            f"📞 {ANEXO_TRANSPORTE}\n\n"
             "Un operador podrá asistirle y restablecer el sistema."
         )
 
@@ -832,7 +853,7 @@ def procesar_cola_telegram():
 
             elif estado_tp == "EN_GESTION":
                 enviar_mensaje_telegram(chat_id,
-                    "TP requiere ser iniciado llamando al número de transporte")
+                    f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}")
                 notificar_grupo(
                     f"⚠️ TP EN GESTION\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
@@ -864,7 +885,7 @@ def procesar_cola_telegram():
                 )
 
             elif estado_tp == "PLANIFICADO":
-                if aviso_wdm:
+                if aviso_wdm and not datos.get("aprobado"):
                     numero_tp = datos["numero"]
                     pendientes_wdm[numero_tp] = {
                         "accion": datos["accion"],
@@ -883,13 +904,13 @@ def procesar_cola_telegram():
                         f"👤 Solicitante: {datos['nombre']} | 📱 {datos['telefono']}\n"
                         f"🏢 Empresa: {datos.get('empresa', 'No aplica')}\n"
                         f"{aviso_wdm}{aviso_lugar}"
-                        f"\nAcción requerida: admin use /aprobar {numero_tp} o /rechazar {numero_tp}."
+                        f"\nAcción requerida: admin use /aceptar {numero_tp} o /rechazar {numero_tp}."
                     )
                     notificar_grupo(admin_msg)
                     enviar_mensaje_telegram(
                         chat_id,
                         "⚠️ Se detectó una condición especial en tu TP. Los administradores fueron notificados y revisarán el caso.\n"
-                        "Si se rechaza, deberás llamar al anexo: 22 360 2280."
+                        f"Si se rechaza, deberás llamar al anexo: {ANEXO_TRANSPORTE}."
                     )
                     ventana.after(1000, procesar_cola_telegram)
                     return
@@ -897,7 +918,7 @@ def procesar_cola_telegram():
                 if lugar_es_sitios() or rpn_es_2500():
                     enviar_mensaje_telegram(
                         chat_id,
-                        "TP requiere ser iniciado llamando al número de transporte"
+                        f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}"
                     )
                     notificar_grupo(
                         f"⛔ TP NO INICIADO AUTOMÁTICAMENTE\n"
@@ -913,19 +934,52 @@ def procesar_cola_telegram():
                     ventana.after(1000, procesar_cola_telegram)
                     return
 
+                if not datos.get("aprobado"):
+                    solicitud_id = crear_solicitud_aprobacion(datos)
+                    actualizar_estado_telegram(
+                        datos.get("estado_ref"),
+                        paso="esperando_aprobacion",
+                        accion=datos["accion"],
+                        numero=datos["numero"],
+                        mensaje_espera=(
+                            f"⏳ Tu TP {datos['numero']} fue enviado a aprobación de administradores. "
+                            "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
+                            "Por favor espere."
+                        )
+                    )
+                    notificar_grupo(
+                        f"🟡 Solicitud pendiente de aprobación #{solicitud_id}\n"
+                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                        f"📌 Título: {datos_tp_actual.get('titulo', 'N/A')}\n"
+                        f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
+                        f"🔢 RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
+                        f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
+                        f"{aviso_lugar}"
+                        f"👤 Solicitante: {datos['nombre']} | 📱 {datos['telefono']}\n"
+                        f"🏢 Empresa: {datos.get('empresa', 'No aplica')}\n"
+                        f"🕐 {hora} hrs\n\n"
+                        f"Para aprobar: /aceptar {solicitud_id}\n"
+                        f"Para rechazar: /rechazar {solicitud_id}"
+                    )
+                    enviar_mensaje_telegram(
+                        chat_id,
+                        f"⏳ Tu TP {datos['numero']} fue enviado a aprobación de administradores. "
+                        "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
+                        "Por favor espere.",
+                        reply_markup={"remove_keyboard": True}
+                    )
+                    ventana.after(1000, procesar_cola_telegram)
+                    return
+
                 def run_inicio():
                     ok = iniciar_tp()
                     if ok:
                         exportar_txt()
                         hora_fin = datetime.now().strftime("%H:%M")
+                        actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
                         enviar_mensaje_telegram(chat_id, "TP iniciado.")
                         notificar_grupo(
-                            f"✅ TP INICIADO\n"
-                            f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                            f"📋 TP: {datos['numero']}\n"
-                            f"RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                            f"{aviso_wdm}{aviso_lugar}"
-                            f"🕐 {hora_fin} hrs"
+                            f"✅ TP INICIADO a las {hora_fin} hrs."
                         )
                     else:
                         enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
@@ -1005,7 +1059,7 @@ def procesar_cola_telegram():
 
             elif estado_tp == "EN_GESTION":
                 enviar_mensaje_telegram(chat_id,
-                    "TP requiere ser gestionado llamando al número de transporte")
+                    f"TP requiere ser gestionado llamando al número de transporte: {ANEXO_TRANSPORTE}")
                 notificar_grupo(
                     f"⚠️ TP EN GESTION\n"
                     f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
@@ -1018,7 +1072,7 @@ def procesar_cola_telegram():
                 if aviso_wdm or lugar_es_sitios() or rpn_es_2500():
                     enviar_mensaje_telegram(
                         chat_id,
-                        "TP requiere ser cerrado llamando al número de transporte"
+                        f"TP requiere ser cerrado llamando al número de transporte: {ANEXO_TRANSPORTE}"
                     )
                     notificar_grupo(
                         f"⛔ TP NO CERRADO AUTOMÁTICAMENTE\n"
@@ -1034,6 +1088,43 @@ def procesar_cola_telegram():
                     ventana.after(1000, procesar_cola_telegram)
                     return
 
+                if not datos.get("aprobado"):
+                    solicitud_id = crear_solicitud_aprobacion(datos)
+                    actualizar_estado_telegram(
+                        datos.get("estado_ref"),
+                        paso="esperando_aprobacion",
+                        accion=datos["accion"],
+                        numero=datos["numero"],
+                        mensaje_espera=(
+                            f"⏳ Tu solicitud de cierre para el TP {datos['numero']} fue enviada a aprobación de administradores. "
+                            "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
+                            "Por favor espere."
+                        )
+                    )
+                    notificar_grupo(
+                        f"🟡 Solicitud pendiente de aprobación #{solicitud_id}\n"
+                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
+                        f"📌 Título: {datos_tp_actual.get('titulo', 'N/A')}\n"
+                        f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
+                        f"🔢 RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
+                        f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
+                        f"{aviso_lugar}"
+                        f"👤 Solicitante: {datos['nombre']} | 📱 {datos['telefono']}\n"
+                        f"🏢 Empresa: {datos.get('empresa', 'No aplica')}\n"
+                        f"🕐 {hora} hrs\n\n"
+                        f"Para aprobar: /aceptar {solicitud_id}\n"
+                        f"Para rechazar: /rechazar {solicitud_id}"
+                    )
+                    enviar_mensaje_telegram(
+                        chat_id,
+                        f"⏳ Tu solicitud de cierre para el TP {datos['numero']} fue enviada a aprobación de administradores. "
+                        "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
+                        "Por favor espere.",
+                        reply_markup={"remove_keyboard": True}
+                    )
+                    ventana.after(1000, procesar_cola_telegram)
+                    return
+
                 nombre_cierre = datos["nombre"]
                 telefono_cierre = datos["telefono"]
 
@@ -1041,16 +1132,12 @@ def procesar_cola_telegram():
                     ok = finalizar_tp(nombre_cierre, telefono_cierre)
                     if ok:
                         hora_fin = datetime.now().strftime("%H:%M")
+                        actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
                         enviar_mensaje_telegram(chat_id,
                             f"✅ TP {datos['numero']} finalizado correctamente.\n"
                             f"Operador: {nombre_cierre} | Tel: {telefono_cierre}")
                         notificar_grupo(
-                            f"🔒 TP CERRADO\n"
-                            f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
-                            f"📋 TP: {datos['numero']}\n"
-                            f"RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                            f"{aviso_wdm}{aviso_lugar}"
-                            f"🕐 {hora_fin} hrs"
+                            f"🔒 TP CERRADO a las {hora_fin} hrs."
                         )
                     else:
                         enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)

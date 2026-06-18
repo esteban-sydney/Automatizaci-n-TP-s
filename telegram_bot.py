@@ -5,7 +5,13 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("python-telegram-bot").setLevel(logging.WARNING)
 import asyncio  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
-from Prueba2PDF import cola_telegram, buscar_en_pdf, pendientes_wdm  # noqa: E402
+from Prueba2PDF import (  # noqa: E402
+    cola_telegram,
+    buscar_en_pdf,
+    pendientes_wdm,
+    pendientes_aprobacion,
+    notificar_grupo
+)
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove  # noqa: E402
 from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
@@ -32,7 +38,7 @@ MSG_VOLVER = "\n\nEscriba *volver* o pulse el botón ↩️ Volver atrás."
 # =========================
 MAX_ERRORES = 5
 BLOQUEO_MINUTOS = 10
-ANEXO_OFICINA = "22 360 2280"
+ANEXO_OFICINA = "22 360 2288"
 
 errores_usuario = {}
 bloqueo_usuario = {}
@@ -63,6 +69,27 @@ def tiempo_restante(chat_id: int) -> str:
 
 def intentos_restantes(chat_id: int) -> int:
     return MAX_ERRORES - errores_usuario.get(chat_id, 0)
+
+def mensaje_espera_aprobacion(numero: str, accion: str) -> str:
+    if accion == "cerrar":
+        return (
+            f"⏳ Tu solicitud de cierre para el TP {numero} fue enviada a aprobación de administradores. "
+            "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
+            "Por favor espere."
+        )
+
+    return (
+        f"⏳ Tu TP {numero} fue enviado a aprobación de administradores. "
+        "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
+        "Por favor espere."
+    )
+
+def mensaje_procesando_aprobado(numero: str, accion: str) -> str:
+    accion_texto = "inicio" if accion == "iniciar" else "cierre"
+    return (
+        f"✅ Tu solicitud para el TP {numero} fue aprobada.\n"
+        f"🕐 TP está procesando {accion_texto}..."
+    )
 
 # =========================
 # TECLADOS
@@ -110,16 +137,18 @@ MSG_ERROR_SISTEMA = (
 # =========================
 async def verificar_usuario(update: Update) -> bool:
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else chat_id
+    auth_id = user_id if update.effective_chat.type in ("group", "supergroup") else chat_id
 
-    if esta_bloqueado(chat_id):
+    if esta_bloqueado(auth_id):
         await update.message.reply_text(
-            f"🔒 Tu acceso está bloqueado por {tiempo_restante(chat_id)}.\n"
+            f"🔒 Tu acceso está bloqueado por {tiempo_restante(auth_id)}.\n"
             f"Intenta nuevamente más tarde."
         )
         return False
 
-    if chat_id not in AUTHORIZED_USERS:
-        print(f"⛔ Acceso denegado para chat_id: {chat_id}")
+    if auth_id not in AUTHORIZED_USERS:
+        print(f"⛔ Acceso denegado para chat_id: {chat_id} | user_id: {user_id}")
         await update.message.reply_text(
             "⛔ No tienes autorización para usar este sistema.\n"
             "Contacta al administrador."
@@ -173,6 +202,22 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if paso == "prevalidando":
             await update.message.reply_text(
                 "⏳ El TP se está validando. Por favor espere un momento."
+            )
+            return
+
+        if paso == "procesando_solicitud":
+            await update.message.reply_text("⏳ Procesando solicitud. Por favor espere.")
+            return
+
+        if paso == "esperando_aprobacion":
+            await update.message.reply_text(
+                estado.get("mensaje_espera", mensaje_espera_aprobacion(estado.get("numero", ""), estado.get("accion", "")))
+            )
+            return
+
+        if paso == "procesando_aprobado":
+            await update.message.reply_text(
+                mensaje_procesando_aprobado(estado.get("numero", ""), estado.get("accion", "iniciar"))
             )
             return
 
@@ -307,7 +352,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total = registrar_error(chat_id)
                 await update.message.reply_text(
                     f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n" \
-                    f"Por favor verifique el número o contacte a un operador 22 360 2280. ",
+                    f"Por favor verifique el número o contacte a un operador {ANEXO_OFICINA}. ",
                     reply_markup=BACK_KEYBOARD
                 )
                 if total >= MAX_ERRORES:
@@ -391,20 +436,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             empresa = "" if texto == "-" else texto
             estado["empresa"] = empresa
-            estado["paso"] = "menu"
+            estado["paso"] = "procesando_solicitud"
             accion = estado["accion"]
-            titulo_resumen = "inicio" if accion == "iniciar" else "cierre"
-
-            resumen = (
-                f"📋 *Resumen {titulo_resumen}:*\n"
-                f"• TP: {estado['numero']}\n"
-                f"• Nombre: {estado['nombre']}\n"
-                f"• Teléfono: {estado['telefono']}\n"
-                f"• Empresa: {empresa if empresa else 'No aplica'}\n\n"
-                f"⏳ Procesando..."
-            )
-
-            await update.message.reply_text(resumen, parse_mode="Markdown")
 
             cola_telegram.put({
                 "accion": accion,
@@ -412,11 +445,12 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "nombre": estado["nombre"],
                 "telefono": estado["telefono"],
                 "empresa": empresa,
-                "chat_id": chat_id
+                "chat_id": chat_id,
+                "estado_ref": estado
             })
 
             print(f"📤 Cola PUT ({accion}) — tamaño: {cola_telegram.qsize()}")
-            estado_usuario[chat_id] = {"paso": "menu"}
+            return
 
     except Exception as e:
         print("ERROR BOT:", e)
@@ -427,21 +461,56 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # =========================
 # ADMIN COMMANDS
-async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def aceptar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await verificar_usuario(update):
         return
 
     args = context.args
     if not args:
-        await update.message.reply_text("Uso: /aprobar <numero_TP>")
+        await update.message.reply_text("Uso: /aceptar <ID_solicitud>")
         return
 
-    numero = args[0].strip()
-    pendiente = pendientes_wdm.pop(numero, None)
+    solicitud_id = args[0].strip()
+    pendiente = pendientes_aprobacion.pop(solicitud_id, None)
+
+    if pendiente:
+        pendiente["aprobado"] = True
+        cola_telegram.put(pendiente)
+        numero = pendiente["numero"]
+        accion_texto = "inicio" if pendiente["accion"] == "iniciar" else "cierre"
+        estado_ref = pendiente.get("estado_ref")
+        if isinstance(estado_ref, dict):
+            estado_ref.clear()
+            estado_ref.update({
+                "paso": "procesando_aprobado",
+                "accion": pendiente["accion"],
+                "numero": numero
+            })
+
+        await update.message.reply_text(
+            f"✅ TP {numero} se enviará a {accion_texto} en el programa, espere..."
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=pendiente["chat_id"],
+                text=(
+                    f"✅ Tu solicitud para el TP {numero} fue aprobada.\n"
+                    f"🕐 TP está procesando {'inicio' if pendiente['accion'] == 'iniciar' else 'cierre'}..."
+                )
+            )
+        except Exception as e:
+            print("ERROR enviando mensaje al usuario aprobado:", e)
+        return
+
+    # Compatibilidad con solicitudes antiguas guardadas por número de TP.
+    pendiente = pendientes_wdm.pop(solicitud_id, None)
     if not pendiente:
-        await update.message.reply_text(f"No hay solicitud pendiente para TP {numero}.")
+        await update.message.reply_text(f"No hay solicitud pendiente con ID/TP {solicitud_id}.")
         return
 
+    numero = pendiente["numero"]
+    pendiente["aprobado"] = True
     cola_telegram.put(pendiente)
     await update.message.reply_text(
         f"✅ TP {numero} aprobado. Se reenvía para iniciar el proceso automáticamente."
@@ -458,21 +527,59 @@ async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("ERROR enviando mensaje al usuario aprobado:", e)
 
+async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await aceptar(update, context)
+
 async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await verificar_usuario(update):
         return
 
     args = context.args
     if not args:
-        await update.message.reply_text("Uso: /rechazar <numero_TP>")
+        await update.message.reply_text("Uso: /rechazar <ID_solicitud>")
         return
 
-    numero = args[0].strip()
-    pendiente = pendientes_wdm.pop(numero, None)
+    solicitud_id = args[0].strip()
+    pendiente = pendientes_aprobacion.pop(solicitud_id, None)
+
+    if pendiente:
+        numero = pendiente["numero"]
+        estado_ref = pendiente.get("estado_ref")
+        if isinstance(estado_ref, dict):
+            estado_ref.clear()
+            estado_ref.update({"paso": "menu"})
+
+        await update.message.reply_text(
+            f"❌ Solicitud TP {numero} rechazada. Se avisó al usuario."
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=pendiente["chat_id"],
+                text=(
+                    f"⚠️ Tu solicitud para el TP {numero} fue revisada y *no fue aprobada*.\n"
+                    f"Por favor contacta al anexo: {ANEXO_OFICINA}."
+                ),
+                parse_mode="Markdown",
+                reply_markup=MENU_KEYBOARD
+            )
+        except Exception as e:
+            print("ERROR enviando mensaje al usuario rechazado:", e)
+
+        notificar_grupo(
+            f"❌ Solicitud #{solicitud_id} rechazada por administrador.\n"
+            f"👤 {pendiente['nombre']} | 📱 {pendiente['telefono']}\n"
+            f"📋 TP: {numero}"
+        )
+        return
+
+    # Compatibilidad con solicitudes antiguas guardadas por número de TP.
+    pendiente = pendientes_wdm.pop(solicitud_id, None)
     if not pendiente:
-        await update.message.reply_text(f"No hay solicitud pendiente para TP {numero}.")
+        await update.message.reply_text(f"No hay solicitud pendiente con ID/TP {solicitud_id}.")
         return
 
+    numero = pendiente["numero"]
     await update.message.reply_text(
         f"❌ TP {numero} rechazado. Se avisó al usuario que debe llamar al anexo."
     )
@@ -510,6 +617,7 @@ def iniciar_bot():
     print("🔥 app creada")
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("aceptar", aceptar))
     app.add_handler(CommandHandler("aprobar", aprobar))
     app.add_handler(CommandHandler("rechazar", rechazar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))

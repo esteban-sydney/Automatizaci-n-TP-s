@@ -341,7 +341,7 @@ def extraer_datos_trabajo():
     lugar = datos_tp_actual.get("lugar", "N/A")
     if lugar and lugar != "N/A":
         return f"📍 Lugar: {lugar}\n"
-    return "📍 Lugar: No encontrado\n""""
+    return "📍 Lugar: No encontrado\n"""
 
 def obtener_aviso_wdm():
     try:
@@ -768,12 +768,10 @@ def procesar_cola_telegram():
                         hora_fin = datetime.now().strftime("%H:%M")
                         enviar_mensaje_telegram(chat_id, "TP iniciado.")
                         notificar_grupo(
-                            f"✅ TP INICIADO\n"
-                            f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                            f"📋 TP: {datos['numero']}\n"
-                            f"RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                            f"{aviso_wdm}{aviso_lugar}"
-                            f"🕐 {hora_fin} hrs"
+                            f"TP Iniciado {datos['numero']}\n"
+                            f"Responsable: {datos['nombre']} | {datos['telefono']}\n"
+                            f"Descripción: {datos_tp_actual.get('descripcion', 'No disponible')}\n"
+                            f"{hora_fin} hrs | RPN: {datos_tp_actual.get('rpn', 'N/A')}"
                         )
                     else:
                         enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)

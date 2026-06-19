@@ -8,11 +8,13 @@ import re  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 from Prueba2PDF import (  # noqa: E402
     cola_telegram,
+    aplicacion_disponible,
     buscar_en_pdf,
     aprobar_inicio_pendiente,
     rechazar_inicio_pendiente,
     obtener_unico_inicio_pendiente,
-    GROUP_CHAT_ID
+    GROUP_CHAT_ID,
+    notificar_admin
 )
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove  # noqa: E402
 from telegram.ext import (  # noqa: E402
@@ -139,6 +141,25 @@ MSG_ERROR_SISTEMA = (
     "Un operador podrá asistirle y restablecer el sistema."
 )
 
+MSG_APP_NO_DISPONIBLE = (
+    "⚠️ El sistema no está disponible en este momento.\n\n"
+    "La aplicación de gestión no se encuentra activa. "
+    f"Por favor contacte a la oficina al anexo:\n📞 *{ANEXO_OFICINA}*"
+)
+
+async def informar_app_no_disponible(update: Update, chat_id: int):
+    estado_usuario[chat_id] = {"paso": "menu"}
+    resetear_errores(chat_id)
+    await update.message.reply_text(
+        MSG_APP_NO_DISPONIBLE,
+        parse_mode="Markdown",
+        reply_markup=MENU_KEYBOARD
+    )
+    notificar_admin(
+        "❌ ERROR\n"
+        "La aplicación de gestión no está activa y un usuario intentó operar por Telegram."
+    )
+
 # =========================
 # VERIFICAR USUARIO
 # =========================
@@ -214,12 +235,18 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if paso == "prevalidando":
+            if not aplicacion_disponible():
+                await informar_app_no_disponible(update, chat_id)
+                return
             await update.message.reply_text(
                 "⏳ El TP se está validando. Por favor espere un momento."
             )
             return
 
         if paso == "procesando_solicitud":
+            if not aplicacion_disponible():
+                await informar_app_no_disponible(update, chat_id)
+                return
             await update.message.reply_text("⏳ Procesando solicitud. Por favor espere.")
             return
 
@@ -294,6 +321,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if paso == "menu":
 
             if texto in ["1️⃣ Iniciar TP", "1"]:
+                if not aplicacion_disponible():
+                    await informar_app_no_disponible(update, chat_id)
+                    return
+
                 resetear_errores(chat_id)
                 cambiar_paso(estado, "numero", accion="iniciar")
                 await update.message.reply_text(
@@ -305,6 +336,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             elif texto in ["2️⃣ Cerrar TP", "2"]:
+                if not aplicacion_disponible():
+                    await informar_app_no_disponible(update, chat_id)
+                    return
+
                 resetear_errores(chat_id)
                 cambiar_paso(estado, "numero", accion="cerrar")
                 await update.message.reply_text(
@@ -357,6 +392,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=BACK_KEYBOARD
                     )
                 return
+            if not aplicacion_disponible():
+                await informar_app_no_disponible(update, chat_id)
+                return
+
             # Validar existencia del TP en los PDFs cargados (UI)
             try:
                 existe = buscar_en_pdf(texto)
@@ -446,6 +485,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             estado["telefono"] = texto
 
             if estado.get("accion") == "cerrar":
+                if not aplicacion_disponible():
+                    await informar_app_no_disponible(update, chat_id)
+                    return
+
                 estado["empresa"] = ""
                 cambiar_paso(estado, "procesando_solicitud")
 
@@ -479,6 +522,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if paso == "empresa":
 
             empresa = "" if texto == "-" else texto
+            if not aplicacion_disponible():
+                await informar_app_no_disponible(update, chat_id)
+                return
+
             estado["empresa"] = empresa
             cambiar_paso(estado, "procesando_solicitud")
             accion = estado["accion"]

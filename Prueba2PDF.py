@@ -42,6 +42,7 @@ ruta_pdf_2 = ""
 
 tp_validado = False
 tp_iniciado = False
+ui_activa = False
 
 texto_bitacora = ""
 datos_tp_actual = {}
@@ -110,6 +111,14 @@ def teclado_volver_telegram():
         "one_time_keyboard": True,
         "input_field_placeholder": "Ingrese el dato o vuelva atrás..."
     }
+
+def aplicacion_disponible():
+    return ui_activa
+
+def cerrar_aplicacion():
+    global ui_activa
+    ui_activa = False
+    ventana.destroy()
 
 # =====================
 # LOGIN
@@ -320,6 +329,25 @@ def obtener_aviso_lugar():
         return f"📍 Lugar: {lugar}\n"
     return "📍 Lugar: No encontrado\n"
 
+def validar_fecha_plan_hoy(datos=None):
+    info = datos or datos_tp_actual
+    fecha_plan = info.get("fecha_plan", "N/A")
+    fecha_hoy = datetime.now().date()
+    try:
+        fecha_tp = datetime.strptime(fecha_plan, "%Y-%m-%d").date()
+    except Exception:
+        return False, fecha_plan, fecha_hoy.strftime("%Y-%m-%d")
+    return fecha_tp == fecha_hoy, fecha_plan, fecha_hoy.strftime("%Y-%m-%d")
+
+def mensaje_fecha_plan_no_corresponde(numero_tp):
+    _, fecha_plan, fecha_hoy = validar_fecha_plan_hoy()
+    return (
+        f"⚠️ TP {numero_tp} no corresponde a la fecha actual.\n\n"
+        f"📅 Fecha planificación: {fecha_plan}\n"
+        f"📅 Fecha actual: {fecha_hoy}\n\n"
+        "Solo se pueden iniciar TP planificados para el día de hoy."
+    )
+
 def obtener_aviso_rpn():
     rpn = datos_tp_actual.get("rpn", "N/A")
     return f"🔢 RPN: {rpn}\n"
@@ -350,6 +378,7 @@ PALABRAS_BLOQUEO_TP = [
     "OSN 9800",
     "OSN8800",
     "OSN 8800",
+    "OLT",
     "RED GPON",
 ]
 
@@ -432,7 +461,7 @@ def ejecutar_validacion(event=None):
         color_fecha = "green"
         try:
             fecha_tp = datetime.strptime(datos["fecha_plan"], "%Y-%m-%d").date()
-            if fecha_tp < datetime.now().date():
+            if fecha_tp != datetime.now().date():
                 color_fecha = "red"
         except:  # noqa: E722
             pass
@@ -503,12 +532,19 @@ def iniciar_tp():
 
     try:
         datos = extraer_datos_trabajo()
-        fecha_tp = datetime.strptime(datos["fecha_plan"], "%Y-%m-%d").date()
-        if fecha_tp < datetime.now().date():
-            messagebox.showerror("Bloqueado", "No puede iniciar un TP vencido")
+        fecha_ok, fecha_plan, fecha_hoy = validar_fecha_plan_hoy(datos)
+        if not fecha_ok:
+            messagebox.showerror(
+                "Bloqueado",
+                "No puede iniciar un TP que no corresponde a la fecha actual.\n\n"
+                f"Fecha planificación: {fecha_plan}\n"
+                f"Fecha actual: {fecha_hoy}"
+            )
             return False
-    except:
-        pass
+    except Exception as e:
+        logger.exception("No fue posible validar fecha de planificación: %s", e)
+        messagebox.showerror("Bloqueado", "No fue posible validar la fecha de planificación del TP")
+        return False
 
     try:
         page.click("text=Iniciar Ejecucion")
@@ -955,6 +991,11 @@ def responder_prevalidacion_telegram(datos):
             return
 
         if estado_tp == "PLANIFICADO":
+            fecha_ok, _, _ = validar_fecha_plan_hoy()
+            if not fecha_ok:
+                volver_menu(mensaje_fecha_plan_no_corresponde(numero_tp))
+                return
+
             if lugar_es_sitios():
                 volver_menu(MSG_SITIO_MOVIL)
                 return
@@ -1169,6 +1210,17 @@ def procesar_cola_telegram():
                 )
 
             elif estado_tp == "PLANIFICADO":
+                fecha_ok, _, _ = validar_fecha_plan_hoy()
+                if not fecha_ok:
+                    mensaje_fecha = mensaje_fecha_plan_no_corresponde(datos["numero"])
+                    enviar_mensaje_telegram(chat_id, mensaje_fecha)
+                    notificar_admin(
+                        f"❌ ERROR {datos.get('tarea_id')} TP {datos['numero']}\n"
+                        "Fecha de planificación no corresponde al día actual."
+                    )
+                    finalizar_tarea(datos)
+                    return
+
                 if lugar_es_sitios():
                     enviar_mensaje_telegram(
                         chat_id,
@@ -1396,12 +1448,15 @@ def procesar_cola_telegram():
 # MAIN
 # =====================
 def main():
+    global ui_activa
     global ventana, entry_trabajo, entry_nombre, entry_telefono, entry_empresa
     global label_pdf_1, label_pdf_2, label_resultado, label_rpn
     global btn_iniciar, btn_finalizar
 
     ventana = tk.Tk()
+    ui_activa = True
     ventana.title("Validador Trabajo Programado")
+    ventana.protocol("WM_DELETE_WINDOW", cerrar_aplicacion)
     ventana.geometry("520x700")
     ventana.resizable(False, False)
     ventana.configure(bg="#f3f4f6")
@@ -1464,7 +1519,7 @@ def main():
     footer.pack(fill="x", pady=(6, 0))
 
     ttk.Button(footer, text="🔄 Restaurar sesión", command=restaurar_sesion).pack(side="left", expand=True, fill="x", padx=(0, 4))
-    ttk.Button(footer, text="Cerrar", command=ventana.destroy).pack(side="right", expand=True, fill="x", padx=(4, 0))
+    ttk.Button(footer, text="Cerrar", command=cerrar_aplicacion).pack(side="right", expand=True, fill="x", padx=(4, 0))
 
     ventana.after(200, mostrar_login)
     ventana.after(1000, procesar_cola_telegram)

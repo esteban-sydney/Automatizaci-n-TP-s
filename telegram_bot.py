@@ -4,13 +4,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("python-telegram-bot").setLevel(logging.WARNING)
 import asyncio  # noqa: E402
+import re  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402
 from Prueba2PDF import (  # noqa: E402
     cola_telegram,
     buscar_en_pdf,
-    pendientes_wdm,
-    pendientes_aprobacion,
-    notificar_grupo
+    aprobar_inicio_pendiente,
+    rechazar_inicio_pendiente
 )
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove  # noqa: E402
 from telegram.ext import (  # noqa: E402
@@ -39,9 +39,34 @@ MSG_VOLVER = "\n\nEscriba *volver* o pulse el botón ↩️ Volver atrás."
 MAX_ERRORES = 5
 BLOQUEO_MINUTOS = 10
 ANEXO_OFICINA = "22 360 2288"
+TIMEOUT_PASO_SEGUNDOS = 45
+PASOS_CON_TIMEOUT = {"numero", "nombre", "telefono", "empresa"}
 
 errores_usuario = {}
 bloqueo_usuario = {}
+
+def cambiar_paso(estado: dict, paso: str, **datos):
+    estado.update(datos)
+    estado["paso"] = paso
+    if paso in PASOS_CON_TIMEOUT:
+        estado["ultimo_paso_en"] = datetime.now()
+    else:
+        estado.pop("ultimo_paso_en", None)
+
+def paso_expirado(estado: dict) -> bool:
+    paso = estado.get("paso")
+    inicio = estado.get("ultimo_paso_en")
+    if paso not in PASOS_CON_TIMEOUT or inicio is None:
+        return False
+    return (datetime.now() - inicio).total_seconds() > TIMEOUT_PASO_SEGUNDOS
+
+async def cancelar_por_timeout(update: Update, chat_id: int):
+    estado_usuario[chat_id] = {"paso": "menu"}
+    resetear_errores(chat_id)
+    await update.message.reply_text(
+        "⏱️ Tu solicitud fue cancelada por tiempo de espera.\n\n" + MSG_MENU,
+        reply_markup=MENU_KEYBOARD
+    )
 
 def registrar_error(chat_id: int) -> int:
     errores_usuario[chat_id] = errores_usuario.get(chat_id, 0) + 1
@@ -69,27 +94,6 @@ def tiempo_restante(chat_id: int) -> str:
 
 def intentos_restantes(chat_id: int) -> int:
     return MAX_ERRORES - errores_usuario.get(chat_id, 0)
-
-def mensaje_espera_aprobacion(numero: str, accion: str) -> str:
-    if accion == "cerrar":
-        return (
-            f"⏳ Tu solicitud de cierre para el TP {numero} fue enviada a aprobación de administradores. "
-            "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
-            "Por favor espere."
-        )
-
-    return (
-        f"⏳ Tu TP {numero} fue enviado a aprobación de administradores. "
-        "Favor de tener en cuenta de la cantidad de trabajos que pueden haber en este momento. "
-        "Por favor espere."
-    )
-
-def mensaje_procesando_aprobado(numero: str, accion: str) -> str:
-    accion_texto = "inicio" if accion == "iniciar" else "cierre"
-    return (
-        f"✅ Tu solicitud para el TP {numero} fue aprobada.\n"
-        f"🕐 TP está procesando {accion_texto}..."
-    )
 
 # =========================
 # TECLADOS
@@ -199,6 +203,10 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         estado = estado_usuario[chat_id]
         paso = estado["paso"]
 
+        if paso_expirado(estado):
+            await cancelar_por_timeout(update, chat_id)
+            return
+
         if paso == "prevalidando":
             await update.message.reply_text(
                 "⏳ El TP se está validando. Por favor espere un momento."
@@ -209,15 +217,22 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⏳ Procesando solicitud. Por favor espere.")
             return
 
-        if paso == "esperando_aprobacion":
+        if paso == "en_cola":
             await update.message.reply_text(
-                estado.get("mensaje_espera", mensaje_espera_aprobacion(estado.get("numero", ""), estado.get("accion", "")))
+                "⏳ Tu solicitud ya fue recibida y está en espera.\n\n"
+                "En este momento se están procesando solicitudes previas de otros colegas. "
+                "Te avisaremos por este chat cuando comience tu atención."
             )
             return
 
-        if paso == "procesando_aprobado":
+        if paso == "procesando":
+            await update.message.reply_text("⏳ Tu solicitud está siendo procesada. Por favor espere.")
+            return
+
+        if paso == "esperando_aprobacion_inicio":
             await update.message.reply_text(
-                mensaje_procesando_aprobado(estado.get("numero", ""), estado.get("accion", "iniciar"))
+                f"⏳ Tu solicitud {estado.get('numero', '')} está siendo validada.\n"
+                "Favor atento a esta conversación."
             )
             return
 
@@ -234,8 +249,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             if paso == "nombre":
-                estado["paso"] = "numero"
                 estado.pop("numero", None)
+                cambiar_paso(estado, "numero")
                 resetear_errores(chat_id)
                 await update.message.reply_text(
                     "Ingrese nuevamente el número de TP:\n"
@@ -246,8 +261,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             if paso == "telefono":
-                estado["paso"] = "nombre"
                 estado.pop("nombre", None)
+                cambiar_paso(estado, "nombre")
                 resetear_errores(chat_id)
                 await update.message.reply_text(
                     "Ingrese nuevamente su nombre y apellido:\n"
@@ -258,8 +273,8 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             if paso == "empresa":
-                estado["paso"] = "telefono"
                 estado.pop("telefono", None)
+                cambiar_paso(estado, "telefono")
                 resetear_errores(chat_id)
                 await update.message.reply_text(
                     "Ingrese nuevamente su número de teléfono:\n"
@@ -274,8 +289,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if texto in ["1️⃣ Iniciar TP", "1"]:
                 resetear_errores(chat_id)
-                estado["accion"] = "iniciar"
-                estado["paso"] = "numero"
+                cambiar_paso(estado, "numero", accion="iniciar")
                 await update.message.reply_text(
                     "📋 *Iniciar TP*\n\n"
                     "Ingrese el número de TP:"
@@ -286,8 +300,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             elif texto in ["2️⃣ Cerrar TP", "2"]:
                 resetear_errores(chat_id)
-                estado["accion"] = "cerrar"
-                estado["paso"] = "numero"
+                cambiar_paso(estado, "numero", accion="cerrar")
                 await update.message.reply_text(
                     "🔒 *Cerrar TP*\n\n"
                     "Ingrese el número de TP:"
@@ -319,6 +332,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not texto.isdigit() or len(texto) != 7:
                 total = registrar_error(chat_id)
+                cambiar_paso(estado, "numero")
 
                 if total >= MAX_ERRORES:
                     bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
@@ -350,6 +364,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not existe:
                 total = registrar_error(chat_id)
+                cambiar_paso(estado, "numero")
                 await update.message.reply_text(
                     f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n" \
                     f"Por favor verifique el número o contacte a un operador {ANEXO_OFICINA}. ",
@@ -364,107 +379,9 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
-            estado_info = validar_estado_tp(texto)
-            estado_plataforma = str(estado_info.get("estado", "ERROR")).upper()
-            descripcion_tp = str(estado_info.get("descripcion", "")).strip()
-
-            if estado.get("accion") == "cerrar":
-                if estado_plataforma == "ERROR_SESION":
-                    await update.message.reply_text(
-                        "⚠️ No hay sesión de navegador activa para validar el TP. "
-                        "Asegúrese de que la UI del operador esté abierta y la sesión PSG activa.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
-                if estado_plataforma == "ERROR":
-                    await update.message.reply_text(
-                        "⚠️ No se pudo validar el estado del TP en la plataforma. "
-                        "Por favor inténtelo nuevamente más tarde.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
-                if estado_plataforma == "NO_PDF":
-                    total = registrar_error(chat_id)
-                    await update.message.reply_text(
-                        f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n"
-                        f"Por favor verifique el número o contacte a un operador 22 360 2280.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    if total >= MAX_ERRORES:
-                        bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
-                        await update.message.reply_text(
-                            f"🔒 Demasiados intentos incorrectos.\n"
-                            f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
-                            reply_markup=QUITAR_TECLADO
-                        )
-                    return
-
-                estado_plataforma_sin_espacios = estado_plataforma.replace(" ", "")
-
-                if "EJECUTADO" in estado_plataforma_sin_espacios:
-                    await update.message.reply_text(
-                        f"⚠️ El TP {texto} ya fue ejecutado y no puede cerrarse. "
-                        "Verifique el número o consulte con un operador.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
-                if "EJECUCION" not in estado_plataforma_sin_espacios:
-                    await update.message.reply_text(
-                        f"⚠️ El TP {texto} no está en estado EN EJECUCIÓN. "
-                        f"Estado actual: {estado_plataforma}.\n\n"
-                        "Solo los TP en EN EJECUCIÓN pueden cerrarse.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
-            if estado.get("accion") == "iniciar":
-                if estado_plataforma == "ERROR_SESION":
-                    await update.message.reply_text(
-                        "⚠️ No hay sesión de navegador activa para validar el TP. "
-                        "Asegúrese de que la UI del operador esté abierta y la sesión PSG activa.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
-                if estado_plataforma == "ERROR":
-                    await update.message.reply_text(
-                        "⚠️ No se pudo validar el estado del TP en la plataforma. "
-                        "Por favor inténtelo nuevamente más tarde.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
-                if estado_plataforma == "NO_PDF":
-                    total = registrar_error(chat_id)
-                    await update.message.reply_text(
-                        f"❌ TP {texto} no fue encontrado en los PDFs disponibles.\n\n"
-                        f"Por favor verifique el número o contacte a un operador 22 360 2280.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    if total >= MAX_ERRORES:
-                        bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
-                        await update.message.reply_text(
-                            f"🔒 Demasiados intentos incorrectos.\n"
-                            f"Acceso bloqueado por {BLOQUEO_MINUTOS} minutos.",
-                            reply_markup=QUITAR_TECLADO
-                        )
-                    return
-
-                if estado_plataforma != "PLANIFICADO":
-                    await update.message.reply_text(
-                        f"⚠️ El TP {texto} no puede iniciarse. "
-                        f"Estado actual: {estado_plataforma}.\n\n"
-                        "Solo los TP en PLANIFICADO pueden iniciarse.",
-                        reply_markup=BACK_KEYBOARD
-                    )
-                    return
-
             resetear_errores(chat_id)
             estado["numero"] = texto
-            estado["paso"] = "prevalidando"
+            cambiar_paso(estado, "prevalidando")
             cola_telegram.put({
                 "tipo": "prevalidar",
                 "accion": estado["accion"],
@@ -486,6 +403,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not es_valido:
                 total = registrar_error(chat_id)
+                cambiar_paso(estado, "nombre")
 
                 if total >= MAX_ERRORES:
                     bloqueo_usuario[chat_id] = datetime.now() + timedelta(minutes=BLOQUEO_MINUTOS)
@@ -507,7 +425,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             resetear_errores(chat_id)
             estado["nombre"] = texto
-            estado["paso"] = "telefono"
+            cambiar_paso(estado, "telefono")
             await update.message.reply_text(
                 "📱 Ingrese su número de teléfono: "
                 "_Puede ingresar el número o contacto que corresponda_" + MSG_VOLVER,
@@ -521,7 +439,29 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resetear_errores(chat_id)
             estado["telefono"] = texto
 
-            estado["paso"] = "empresa"
+            if estado.get("accion") == "cerrar":
+                estado["empresa"] = ""
+                cambiar_paso(estado, "procesando_solicitud")
+
+                cola_telegram.put({
+                    "accion": "cerrar",
+                    "numero": estado["numero"],
+                    "nombre": estado["nombre"],
+                    "telefono": estado["telefono"],
+                    "empresa": "",
+                    "tp_info": estado.get("tp_info", {}),
+                    "chat_id": chat_id,
+                    "estado_ref": estado
+                })
+
+                print(f"📤 Cola PUT (cerrar) — tamaño: {cola_telegram.qsize()}")
+                await update.message.reply_text(
+                    f"⏳ Procesando solicitud de cierre para TP {estado['numero']}. Espere un momento...",
+                    reply_markup=QUITAR_TECLADO
+                )
+                return
+
+            cambiar_paso(estado, "empresa")
             await update.message.reply_text(
                 "🏢 Ingrese el nombre de su empresa:" + MSG_VOLVER,
                 parse_mode="Markdown",
@@ -534,7 +474,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             empresa = "" if texto == "-" else texto
             estado["empresa"] = empresa
-            estado["paso"] = "procesando_solicitud"
+            cambiar_paso(estado, "procesando_solicitud")
             accion = estado["accion"]
 
             cola_telegram.put({
@@ -543,11 +483,16 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "nombre": estado["nombre"],
                 "telefono": estado["telefono"],
                 "empresa": empresa,
+                "tp_info": estado.get("tp_info", {}),
                 "chat_id": chat_id,
                 "estado_ref": estado
             })
 
             print(f"📤 Cola PUT ({accion}) — tamaño: {cola_telegram.qsize()}")
+            await update.message.reply_text(
+                f"⏳ Procesando solicitud para TP {estado['numero']}. Espere un momento...",
+                reply_markup=QUITAR_TECLADO
+            )
             return
 
     except Exception as e:
@@ -557,148 +502,41 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# =========================
-# ADMIN COMMANDS
-async def aceptar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def aprobar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await verificar_usuario(update):
         return
 
-    args = context.args
-    if not args:
-        await update.message.reply_text("Uso: /aceptar <ID_solicitud>")
+    tarea_id = obtener_id_comando_admin(update, context)
+    if not tarea_id:
+        await update.message.reply_text("Uso: /SI INI-123")
         return
 
-    solicitud_id = args[0].strip()
-    pendiente = pendientes_aprobacion.pop(solicitud_id, None)
+    ok, mensaje = aprobar_inicio_pendiente(tarea_id)
+    await update.message.reply_text(mensaje)
 
-    if pendiente:
-        pendiente["aprobado"] = True
-        cola_telegram.put(pendiente)
-        numero = pendiente["numero"]
-        accion_texto = "inicio" if pendiente["accion"] == "iniciar" else "cierre"
-        estado_ref = pendiente.get("estado_ref")
-        if isinstance(estado_ref, dict):
-            estado_ref.clear()
-            estado_ref.update({
-                "paso": "procesando_aprobado",
-                "accion": pendiente["accion"],
-                "numero": numero
-            })
-
-        await update.message.reply_text(
-            f"✅ TP {numero} se enviará a {accion_texto} en el programa, espere..."
-        )
-
-        try:
-            await context.bot.send_message(
-                chat_id=pendiente["chat_id"],
-                text=(
-                    f"✅ Tu solicitud para el TP {numero} fue aprobada.\n"
-                    f"🕐 TP está procesando {'inicio' if pendiente['accion'] == 'iniciar' else 'cierre'}..."
-                )
-            )
-        except Exception as e:
-            print("ERROR enviando mensaje al usuario aprobado:", e)
-        return
-
-    # Compatibilidad con solicitudes antiguas guardadas por número de TP.
-    pendiente = pendientes_wdm.pop(solicitud_id, None)
-    if not pendiente:
-        await update.message.reply_text(f"No hay solicitud pendiente con ID/TP {solicitud_id}.")
-        return
-
-    numero = pendiente["numero"]
-    pendiente["aprobado"] = True
-    cola_telegram.put(pendiente)
-    await update.message.reply_text(
-        f"✅ TP {numero} aprobado. Se reenvía para iniciar el proceso automáticamente."
-    )
-
-    try:
-        await context.bot.send_message(
-            chat_id=pendiente["chat_id"],
-            text=(
-                f"✅ Tu TP {numero} fue aprobado por los administradores.\n"
-                "Se procederá con el inicio. Si hay novedades, te avisaremos aquí."
-            )
-        )
-    except Exception as e:
-        print("ERROR enviando mensaje al usuario aprobado:", e)
-
-async def aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await aceptar(update, context)
-
-async def rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def rechazar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await verificar_usuario(update):
         return
 
-    args = context.args
-    if not args:
-        await update.message.reply_text("Uso: /rechazar <ID_solicitud>")
+    tarea_id = obtener_id_comando_admin(update, context)
+    if not tarea_id:
+        await update.message.reply_text("Uso: /NO INI-123")
         return
 
-    solicitud_id = args[0].strip()
-    pendiente = pendientes_aprobacion.pop(solicitud_id, None)
+    ok, mensaje = rechazar_inicio_pendiente(tarea_id)
+    await update.message.reply_text(mensaje)
 
-    if pendiente:
-        numero = pendiente["numero"]
-        estado_ref = pendiente.get("estado_ref")
-        if isinstance(estado_ref, dict):
-            estado_ref.clear()
-            estado_ref.update({"paso": "menu"})
+def obtener_id_comando_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        return context.args[0].strip().upper()
 
-        await update.message.reply_text(
-            f"❌ Solicitud TP {numero} rechazada. Se avisó al usuario."
-        )
+    reply = getattr(update.message, "reply_to_message", None)
+    texto_reply = getattr(reply, "text", "") if reply else ""
+    match = re.search(r"\bINI-\d{3}\b", texto_reply.upper())
+    if match:
+        return match.group(0)
 
-        try:
-            await context.bot.send_message(
-                chat_id=pendiente["chat_id"],
-                text=(
-                    f"⚠️ Tu solicitud para el TP {numero} fue revisada y *no fue aprobada*.\n"
-                    f"Por favor contacta al anexo: {ANEXO_OFICINA}."
-                ),
-                parse_mode="Markdown",
-                reply_markup=MENU_KEYBOARD
-            )
-        except Exception as e:
-            print("ERROR enviando mensaje al usuario rechazado:", e)
-
-        notificar_grupo(
-            f"❌ Solicitud #{solicitud_id} rechazada por administrador.\n"
-            f"👤 {pendiente['nombre']} | 📱 {pendiente['telefono']}\n"
-            f"📋 TP: {numero}"
-        )
-        return
-
-    # Compatibilidad con solicitudes antiguas guardadas por número de TP.
-    pendiente = pendientes_wdm.pop(solicitud_id, None)
-    if not pendiente:
-        await update.message.reply_text(f"No hay solicitud pendiente con ID/TP {solicitud_id}.")
-        return
-
-    numero = pendiente["numero"]
-    await update.message.reply_text(
-        f"❌ TP {numero} rechazado. Se avisó al usuario que debe llamar al anexo."
-    )
-
-    try:
-        await context.bot.send_message(
-            chat_id=pendiente["chat_id"],
-            text=(
-                f"⚠️ Tu TP {numero} fue revisado y *no fue aprobado* para inicio automático.\n"
-                f"Por favor contacta al anexo: {ANEXO_OFICINA}."
-            ),
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        print("ERROR enviando mensaje al usuario rechazado:", e)
-
-    notificar_grupo(
-        f"❌ TP {numero} rechazado por administrador.\n"
-        f"👤 {pendiente['nombre']} | 📱 {pendiente['telefono']}\n"
-        f"📋 TP: {numero}"
-    )
+    return None
 
 # =========================
 # INICIAR BOT
@@ -715,9 +553,8 @@ def iniciar_bot():
     print("🔥 app creada")
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("aceptar", aceptar))
-    app.add_handler(CommandHandler("aprobar", aprobar))
-    app.add_handler(CommandHandler("rechazar", rechazar))
+    app.add_handler(CommandHandler(["SI", "si"], aprobar_inicio))
+    app.add_handler(CommandHandler(["NO", "no"], rechazar_inicio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
     print("BOT ONLINE ✅")

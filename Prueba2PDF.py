@@ -85,10 +85,13 @@ def notificar_grupo(mensaje):
     """Notificaciones al grupo deshabilitadas para reiniciar el flujo base."""
     return
 
-def notificar_admin(mensaje):
+def notificar_admin(mensaje, reply_markup=None):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": GROUP_CHAT_ID, "text": mensaje})
+        payload = {"chat_id": GROUP_CHAT_ID, "text": mensaje}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        requests.post(url, json=payload)
     except Exception as e:
         print("Error notificacion admin:", e)
 
@@ -347,6 +350,7 @@ PALABRAS_BLOQUEO_TP = [
     "OSN 9800",
     "OSN8800",
     "OSN 8800",
+    "RED GPON",
 ]
 
 def obtener_aviso_wdm():
@@ -752,8 +756,9 @@ def total_tareas_activas():
 def enviar_solicitud_inicio_admin(datos):
     tp_info = datos.get("tp_info", {})
     empresa = datos.get("empresa", "") or "No informada"
+    tarea_id = datos["tarea_id"]
     notificar_admin(
-        f"Solicitud de inicio de TP {datos['numero']} ID {datos['tarea_id']}\n\n"
+        f"Solicitud de inicio de TP {datos['numero']} ID {tarea_id}\n\n"
         f"📄 Descripción: {tp_info.get('descripcion', 'N/A')}\n"
         f"🔢 RPN: {tp_info.get('rpn', 'N/A')}\n"
         f"📅 Fecha plan: {tp_info.get('fecha_plan', 'N/A')}\n"
@@ -761,8 +766,14 @@ def enviar_solicitud_inicio_admin(datos):
         f"📱 Teléfono: {datos['telefono']}\n"
         f"🏢 Empresa: {empresa}\n\n"
         f"Responder:\n"
-        f"/SI {datos['tarea_id']}\n"
-        f"/NO {datos['tarea_id']}"
+        f"/SI {tarea_id}\n"
+        f"/NO {tarea_id}",
+        reply_markup={
+            "inline_keyboard": [[
+                {"text": f"✅ SI {tarea_id}", "callback_data": f"SI:{tarea_id}"},
+                {"text": f"❌ NO {tarea_id}", "callback_data": f"NO:{tarea_id}"}
+            ]]
+        }
     )
 
 def aprobar_inicio_pendiente(tarea_id):
@@ -772,9 +783,15 @@ def aprobar_inicio_pendiente(tarea_id):
         return False, f"No hay solicitud de inicio pendiente con ID {tarea_id}."
 
     datos["aprobado_inicio"] = True
-    recibir_tarea_telegram(datos)
+    cola_telegram.put(datos)
+    print(f"✅ INICIO APROBADO {tarea_id} enviado a cola_telegram — tamaño: {cola_telegram.qsize()}")
     notificar_admin(f"✅ INICIO_APROBADO {tarea_id} TP {datos['numero']}")
     return True, f"✅ Solicitud {tarea_id} aprobada. Entró al flujo de atención."
+
+def obtener_unico_inicio_pendiente():
+    if len(pendientes_inicio) == 1:
+        return next(iter(pendientes_inicio))
+    return None
 
 def rechazar_inicio_pendiente(tarea_id):
     tarea_id = tarea_id.strip().upper()
@@ -824,6 +841,7 @@ def recibir_tarea_telegram(datos):
         return
 
     cola_tareas.put(datos)
+    print(f"📥 Tarea {tarea_id} en cola_tareas — tamaño: {cola_tareas.qsize()}")
     actualizar_estado_telegram(
         datos.get("estado_ref"),
         paso="en_cola",
@@ -949,6 +967,7 @@ def responder_prevalidacion_telegram(datos):
 
             continuar_flujo(
                 f"✅ TP {numero_tp} validado correctamente.\n"
+                f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
                 "\n👤 Ingrese su nombre y apellido:\n"
                 "(Ejemplo: Juan Pérez)\n\n"
                 "Escriba volver o pulse el botón ↩️ Volver atrás."
@@ -1036,6 +1055,9 @@ def procesar_cola_telegram():
             responder_prevalidacion_telegram(datos)
             ventana.after(1000, procesar_cola_telegram)
             return
+
+        if datos.get("aprobado_inicio"):
+            print(f"📥 Inicio aprobado recibido por UI: {datos.get('tarea_id')} TP {datos.get('numero')}")
 
         recibir_tarea_telegram(datos)
         ventana.after(1000, procesar_cola_telegram)

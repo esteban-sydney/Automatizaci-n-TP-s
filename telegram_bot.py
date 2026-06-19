@@ -10,11 +10,14 @@ from Prueba2PDF import (  # noqa: E402
     cola_telegram,
     buscar_en_pdf,
     aprobar_inicio_pendiente,
-    rechazar_inicio_pendiente
+    rechazar_inicio_pendiente,
+    obtener_unico_inicio_pendiente,
+    GROUP_CHAT_ID
 )
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove  # noqa: E402
 from telegram.ext import (  # noqa: E402
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -142,6 +145,9 @@ MSG_ERROR_SISTEMA = (
 async def verificar_usuario(update: Update) -> bool:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id if update.effective_user else chat_id
+    if update.effective_chat.type in ("group", "supergroup") and chat_id == GROUP_CHAT_ID:
+        return True
+
     auth_id = user_id if update.effective_chat.type in ("group", "supergroup") else chat_id
 
     if esta_bloqueado(auth_id):
@@ -526,17 +532,71 @@ async def rechazar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, mensaje = rechazar_inicio_pendiente(tarea_id)
     await update.message.reply_text(mensaje)
 
+async def responder_boton_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else chat_id
+    if chat_id != GROUP_CHAT_ID and user_id not in AUTHORIZED_USERS:
+        await query.message.reply_text("⛔ No tienes autorización para aprobar o rechazar solicitudes.")
+        return
+
+    try:
+        accion, tarea_id = query.data.split(":", 1)
+    except ValueError:
+        await query.message.reply_text("⚠️ Acción no válida.")
+        return
+
+    if accion == "SI":
+        ok, mensaje = aprobar_inicio_pendiente(tarea_id)
+    elif accion == "NO":
+        ok, mensaje = rechazar_inicio_pendiente(tarea_id)
+    else:
+        ok, mensaje = False, "⚠️ Acción no válida."
+
+    await query.message.reply_text(mensaje)
+
+async def responder_comando_admin_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await verificar_usuario(update):
+        return
+
+    texto = update.message.text.strip()
+    if re.match(r"^/si(?:@\w+)?(?:\s|$)", texto, re.IGNORECASE):
+        tarea_id = obtener_id_comando_admin(update, context)
+        if not tarea_id:
+            await update.message.reply_text("Uso: /SI INI-123")
+            return
+        ok, mensaje = aprobar_inicio_pendiente(tarea_id)
+        await update.message.reply_text(mensaje)
+        return
+
+    if re.match(r"^/no(?:@\w+)?(?:\s|$)", texto, re.IGNORECASE):
+        tarea_id = obtener_id_comando_admin(update, context)
+        if not tarea_id:
+            await update.message.reply_text("Uso: /NO INI-123")
+            return
+        ok, mensaje = rechazar_inicio_pendiente(tarea_id)
+        await update.message.reply_text(mensaje)
+
 def obtener_id_comando_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         return context.args[0].strip().upper()
 
+    texto = getattr(update.message, "text", "") or ""
+    match = re.search(r"\bINI-\d{3}\b", texto.upper())
+    if match:
+        return match.group(0)
+
     reply = getattr(update.message, "reply_to_message", None)
-    texto_reply = getattr(reply, "text", "") if reply else ""
+    texto_reply = ""
+    if reply:
+        texto_reply = getattr(reply, "text", "") or getattr(reply, "caption", "") or ""
     match = re.search(r"\bINI-\d{3}\b", texto_reply.upper())
     if match:
         return match.group(0)
 
-    return None
+    return obtener_unico_inicio_pendiente()
 
 # =========================
 # INICIAR BOT
@@ -553,8 +613,10 @@ def iniciar_bot():
     print("🔥 app creada")
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(responder_boton_admin, pattern=r"^(SI|NO):INI-\d{3}$"))
     app.add_handler(CommandHandler(["SI", "si"], aprobar_inicio))
     app.add_handler(CommandHandler(["NO", "no"], rechazar_inicio))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^/(si|no)(?:@\w+)?(?:\s|$)"), responder_comando_admin_texto))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
     print("BOT ONLINE ✅")

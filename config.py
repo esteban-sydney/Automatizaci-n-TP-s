@@ -27,5 +27,5 @@ AUTHORIZED_USERS = [
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN no encontrado. Verifica tu archivo .env")
 
-if not AUTHORIZED_USERS:
-    raise ValueError("❌ AUTHORIZED_USERS no encontrado. Verifica tu archivo .env")
+#if not AUTHORIZED_USERS:
+#    raise ValueError("❌ AUTHORIZED_USERS no encontrado. Verifica tu archivo .env")

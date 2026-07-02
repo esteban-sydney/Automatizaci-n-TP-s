@@ -631,6 +631,21 @@ def mostrar_finalizar_tp(nombre_inicial="", telefono_inicial="", auto_confirmar=
 
 def completar_formulario_cierre(nombre, telefono, texto_cierre):
     """Completa el formulario web de cierre usando campos separados o textarea."""
+    comentario = page.locator("textarea[name='comentario']").first
+    inventario_datos = page.locator("textarea[name='inventario_datos']").first
+
+    comentario_ok = comentario.count() > 0
+    inventario_ok = inventario_datos.count() > 0
+
+    if comentario_ok:
+        comentario.fill(texto_cierre)
+
+    if inventario_ok:
+        inventario_datos.fill("..")
+
+    if comentario_ok or inventario_ok:
+        return
+
     campos_nombre = [
         "input[name*='nombre' i]",
         "input[id*='nombre' i]",

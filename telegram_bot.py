@@ -165,11 +165,10 @@ async def informar_app_no_disponible(update: Update, chat_id: int):
 # =========================
 async def verificar_usuario(update: Update) -> bool:
     chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
     user_id = update.effective_user.id if update.effective_user else chat_id
-    if update.effective_chat.type in ("group", "supergroup") and chat_id == GROUP_CHAT_ID:
-        return True
 
-    auth_id = user_id if update.effective_chat.type in ("group", "supergroup") else chat_id
+    auth_id = user_id if chat_type in ("group", "supergroup") else chat_id
 
     if esta_bloqueado(auth_id):
         await update.message.reply_text(
@@ -178,15 +177,36 @@ async def verificar_usuario(update: Update) -> bool:
         )
         return False
 
-    if auth_id not in AUTHORIZED_USERS:
-        print(f"⛔ Acceso denegado para chat_id: {chat_id} | user_id: {user_id}")
-        await update.message.reply_text(
-            "⛔ No tienes autorización para usar este sistema.\n"
-            "Contacta al administrador."
-        )
-        return False
+    # Cualquier usuario puede usar el bot por chat privado.
+    if chat_type == "private":
+        return True
 
-    return True
+    # Solo se permite el grupo administrativo configurado.
+    if chat_type in ("group", "supergroup") and chat_id == GROUP_CHAT_ID:
+        return True
+
+    await update.message.reply_text(
+        "⚠️ Este bot solo funciona por chat privado.\n\n"
+        "Ingresa directamente desde este enlace:\n"
+        "https://t.me/mibot_tp_robot"
+    )
+    return False
+
+async def verificar_admin(update: Update) -> bool:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else chat_id
+
+    if update.effective_chat.type in ("group", "supergroup") and chat_id == GROUP_CHAT_ID:
+        return True
+
+    if user_id in AUTHORIZED_USERS:
+        return True
+
+    if update.message:
+        await update.message.reply_text("⛔ No tienes autorización para aprobar o rechazar solicitudes.")
+    elif update.callback_query:
+        await update.callback_query.message.reply_text("⛔ No tienes autorización para aprobar o rechazar solicitudes.")
+    return False
 
 # =========================
 # START
@@ -556,7 +576,7 @@ async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def aprobar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await verificar_usuario(update):
+    if not await verificar_admin(update):
         return
 
     tarea_id = obtener_id_comando_admin(update, context)
@@ -568,7 +588,7 @@ async def aprobar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(mensaje)
 
 async def rechazar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await verificar_usuario(update):
+    if not await verificar_admin(update):
         return
 
     tarea_id = obtener_id_comando_admin(update, context)
@@ -605,7 +625,7 @@ async def responder_boton_admin(update: Update, context: ContextTypes.DEFAULT_TY
     await query.message.reply_text(mensaje)
 
 async def responder_comando_admin_texto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await verificar_usuario(update):
+    if not await verificar_admin(update):
         return
 
     texto = update.message.text.strip()

@@ -779,6 +779,40 @@ def exportar_txt():
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo exportar:\n{str(e)}")
 
+def marcar_tp_finalizado_txt(numero_tp):
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bitacora_tp.txt")
+
+    try:
+        if not os.path.exists(ruta):
+            logger.warning("No existe bitacora_tp.txt para marcar TP %s como finalizado", numero_tp)
+            return False
+
+        with open(ruta, "r", encoding="utf-8") as archivo:
+            lineas = archivo.readlines()
+
+        marcador = "//finalizado"
+        actualizado = False
+        patron_tp = re.compile(rf"\bTP\s+{re.escape(str(numero_tp))}\b")
+
+        for i, linea in enumerate(lineas):
+            if patron_tp.search(linea) and marcador not in linea:
+                lineas[i] = linea.rstrip("\r\n") + f" {marcador}\n"
+                actualizado = True
+                break
+
+        if not actualizado:
+            logger.warning("No se encontró TP %s sin marcar en bitacora_tp.txt", numero_tp)
+            return False
+
+        with open(ruta, "w", encoding="utf-8") as archivo:
+            archivo.writelines(lineas)
+
+        return True
+
+    except Exception as e:
+        logger.exception("No se pudo marcar TP %s como finalizado en TXT: %s", numero_tp, e)
+        return False
+
 # =====================
 # PROCESAR COLA TELEGRAM
 # =====================
@@ -808,8 +842,9 @@ def enviar_solicitud_inicio_admin(datos):
     tp_info = datos.get("tp_info", {})
     empresa = datos.get("empresa", "") or "No informada"
     tarea_id = datos["tarea_id"]
+    accion_texto = "inicio" if datos.get("accion") == "iniciar" else "cierre"
     notificar_admin(
-        f"Solicitud de inicio de TP {datos['numero']} ID {tarea_id}\n\n"
+        f"Solicitud de {accion_texto} de TP {datos['numero']} ID {tarea_id}\n\n"
         f"📄 Descripción: {tp_info.get('descripcion', 'N/A')}\n"
         f"🔢 RPN: {tp_info.get('rpn', 'N/A')}\n"
         f"📅 Fecha plan: {tp_info.get('fecha_plan', 'N/A')}\n"
@@ -831,12 +866,13 @@ def aprobar_inicio_pendiente(tarea_id):
     tarea_id = tarea_id.strip().upper()
     datos = pendientes_inicio.pop(tarea_id, None)
     if not datos:
-        return False, f"No hay solicitud de inicio pendiente con ID {tarea_id}."
+        return False, f"No hay solicitud pendiente con ID {tarea_id}."
 
-    datos["aprobado_inicio"] = True
+    datos["aprobado_admin"] = True
     cola_telegram.put(datos)
-    print(f"✅ INICIO APROBADO {tarea_id} enviado a cola_telegram — tamaño: {cola_telegram.qsize()}")
-    notificar_admin(f"✅ INICIO_APROBADO {tarea_id} TP {datos['numero']}")
+    accion_admin = "INICIO_APROBADO" if datos.get("accion") == "iniciar" else "CIERRE_APROBADO"
+    print(f"✅ {accion_admin} {tarea_id} enviado a cola_telegram — tamaño: {cola_telegram.qsize()}")
+    notificar_admin(f"✅ {accion_admin} {tarea_id} TP {datos['numero']}")
     return True, f"✅ Solicitud {tarea_id} aprobada. Entró al flujo de atención."
 
 def obtener_unico_inicio_pendiente():
@@ -848,7 +884,7 @@ def rechazar_inicio_pendiente(tarea_id):
     tarea_id = tarea_id.strip().upper()
     datos = pendientes_inicio.pop(tarea_id, None)
     if not datos:
-        return False, f"No hay solicitud de inicio pendiente con ID {tarea_id}."
+        return False, f"No hay solicitud pendiente con ID {tarea_id}."
 
     ids_tareas_activas.discard(tarea_id)
     actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
@@ -857,7 +893,8 @@ def rechazar_inicio_pendiente(tarea_id):
         f"⚠️ Tu solicitud {datos['numero']} no fue aprobada.\n"
         f"Por favor contacta al anexo {ANEXO_TRANSPORTE}."
     )
-    notificar_admin(f"❌ INICIO_RECHAZADO {tarea_id} TP {datos['numero']}")
+    accion_admin = "INICIO_RECHAZADO" if datos.get("accion") == "iniciar" else "CIERRE_RECHAZADO"
+    notificar_admin(f"❌ {accion_admin} {tarea_id} TP {datos['numero']}")
     return True, f"❌ Solicitud {tarea_id} rechazada."
 
 def recibir_tarea_telegram(datos):
@@ -873,7 +910,7 @@ def recibir_tarea_telegram(datos):
     tarea_id = datos.get("tarea_id") or generar_id_tarea(datos.get("accion"))
     datos["tarea_id"] = tarea_id
 
-    if datos.get("accion") == "iniciar" and not datos.get("aprobado_inicio"):
+    if datos.get("accion") in ("iniciar", "cerrar") and not datos.get("aprobado_admin"):
         pendientes_inicio[tarea_id] = datos
         actualizar_estado_telegram(
             datos.get("estado_ref"),
@@ -1112,8 +1149,8 @@ def procesar_cola_telegram():
             ventana.after(1000, procesar_cola_telegram)
             return
 
-        if datos.get("aprobado_inicio"):
-            print(f"📥 Inicio aprobado recibido por UI: {datos.get('tarea_id')} TP {datos.get('numero')}")
+        if datos.get("aprobado_admin"):
+            print(f"📥 Solicitud aprobada recibida por UI: {datos.get('tarea_id')} TP {datos.get('numero')}")
 
         recibir_tarea_telegram(datos)
         ventana.after(1000, procesar_cola_telegram)
@@ -1415,6 +1452,7 @@ def procesar_cola_telegram():
                     def responder_resultado_cierre(ok):
                         if ok:
                             hora_fin = datetime.now().strftime("%H:%M")
+                            marcar_tp_finalizado_txt(datos["numero"])
                             actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
                             enviar_mensaje_telegram(chat_id,
                                 f"✅ TP {datos['numero']} finalizado correctamente.\n"

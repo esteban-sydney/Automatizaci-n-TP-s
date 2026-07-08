@@ -581,7 +581,7 @@ async def aprobar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     tarea_id = obtener_id_comando_admin(update, context)
     if not tarea_id:
-        await update.message.reply_text("Uso: /SI INI-123")
+        await update.message.reply_text("Uso: /SI INI-123 o /SI CIE-123")
         return
 
     ok, mensaje = aprobar_inicio_pendiente(tarea_id)
@@ -593,7 +593,7 @@ async def rechazar_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     tarea_id = obtener_id_comando_admin(update, context)
     if not tarea_id:
-        await update.message.reply_text("Uso: /NO INI-123")
+        await update.message.reply_text("Uso: /NO INI-123 o /NO CIE-123")
         return
 
     ok, mensaje = rechazar_inicio_pendiente(tarea_id)
@@ -632,7 +632,7 @@ async def responder_comando_admin_texto(update: Update, context: ContextTypes.DE
     if re.match(r"^/si(?:@\w+)?(?:\s|$)", texto, re.IGNORECASE):
         tarea_id = obtener_id_comando_admin(update, context)
         if not tarea_id:
-            await update.message.reply_text("Uso: /SI INI-123")
+            await update.message.reply_text("Uso: /SI INI-123 o /SI CIE-123")
             return
         ok, mensaje = aprobar_inicio_pendiente(tarea_id)
         await update.message.reply_text(mensaje)
@@ -641,7 +641,7 @@ async def responder_comando_admin_texto(update: Update, context: ContextTypes.DE
     if re.match(r"^/no(?:@\w+)?(?:\s|$)", texto, re.IGNORECASE):
         tarea_id = obtener_id_comando_admin(update, context)
         if not tarea_id:
-            await update.message.reply_text("Uso: /NO INI-123")
+            await update.message.reply_text("Uso: /NO INI-123 o /NO CIE-123")
             return
         ok, mensaje = rechazar_inicio_pendiente(tarea_id)
         await update.message.reply_text(mensaje)
@@ -651,7 +651,7 @@ def obtener_id_comando_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return context.args[0].strip().upper()
 
     texto = getattr(update.message, "text", "") or ""
-    match = re.search(r"\bINI-\d{3}\b", texto.upper())
+    match = re.search(r"\b(?:INI|CIE)-\d{3}\b", texto.upper())
     if match:
         return match.group(0)
 
@@ -659,7 +659,7 @@ def obtener_id_comando_admin(update: Update, context: ContextTypes.DEFAULT_TYPE)
     texto_reply = ""
     if reply:
         texto_reply = getattr(reply, "text", "") or getattr(reply, "caption", "") or ""
-    match = re.search(r"\bINI-\d{3}\b", texto_reply.upper())
+    match = re.search(r"\b(?:INI|CIE)-\d{3}\b", texto_reply.upper())
     if match:
         return match.group(0)
 
@@ -680,7 +680,7 @@ def iniciar_bot():
     print("🔥 app creada")
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(responder_boton_admin, pattern=r"^(SI|NO):INI-\d{3}$"))
+    app.add_handler(CallbackQueryHandler(responder_boton_admin, pattern=r"^(SI|NO):(INI|CIE)-\d{3}$"))
     app.add_handler(CommandHandler(["SI", "si"], aprobar_inicio))
     app.add_handler(CommandHandler(["NO", "no"], rechazar_inicio))
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^/(si|no)(?:@\w+)?(?:\s|$)"), responder_comando_admin_texto))

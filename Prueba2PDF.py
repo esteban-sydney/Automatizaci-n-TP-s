@@ -378,6 +378,8 @@ PALABRAS_BLOQUEO_TP = [
     "OSN 9800",
     "OSN8800",
     "OSN 8800",
+    "Red Acceso FO RM",
+    "Intervencion de Mufa",
     "OLT",
     "RED GPON",
 ]

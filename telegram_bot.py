@@ -9,6 +9,8 @@ from datetime import datetime, timedelta  # noqa: E402
 from Prueba2PDF import (  # noqa: E402
     cola_telegram,
     aplicacion_disponible,
+    modo_mantenimiento_activo,
+    MSG_MANTENIMIENTO_TELEGRAM,
     buscar_en_pdf,
     aprobar_inicio_pendiente,
     rechazar_inicio_pendiente,
@@ -160,6 +162,17 @@ async def informar_app_no_disponible(update: Update, chat_id: int):
         "La aplicación de gestión no está activa y un usuario intentó operar por Telegram."
     )
 
+async def informar_mantenimiento(update: Update, chat_id: int):
+    estado_usuario[chat_id] = {"paso": "menu"}
+    resetear_errores(chat_id)
+    await update.message.reply_text(
+        MSG_MANTENIMIENTO_TELEGRAM,
+        reply_markup=QUITAR_TECLADO
+    )
+
+def debe_mostrar_mantenimiento(update: Update) -> bool:
+    return update.effective_chat.type == "private" and modo_mantenimiento_activo()
+
 # =========================
 # VERIFICAR USUARIO
 # =========================
@@ -216,6 +229,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await verificar_usuario(update):
         return
 
+    if debe_mostrar_mantenimiento(update):
+        await informar_mantenimiento(update, update.effective_chat.id)
+        return
+
     print("✅ /start ejecutado")
 
     chat_id = update.effective_chat.id
@@ -232,6 +249,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not await verificar_usuario(update):
+        return
+
+    if debe_mostrar_mantenimiento(update):
+        await informar_mantenimiento(update, update.effective_chat.id)
         return
 
     try:

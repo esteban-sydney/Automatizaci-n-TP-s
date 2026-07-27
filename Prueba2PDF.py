@@ -43,6 +43,7 @@ ruta_pdf_2 = ""
 tp_validado = False
 tp_iniciado = False
 ui_activa = False
+mantenimiento_telegram_activo = False
 
 texto_bitacora = ""
 datos_tp_actual = {}
@@ -63,6 +64,8 @@ MSG_SITIO_MOVIL = (
     "El TP ingresado no puede ser iniciado por nosotros, ya que hay un Sitio Móvil involucrado. "
     "Favor de contactar a Primera Linea de RAN Telegram: +56 9 8761 0440 donde le atenderá un ingeniero especializado."
 )
+
+MSG_MANTENIMIENTO_TELEGRAM = "Chat se encuentra en mantención, favor de llamar al anexo de NOC de Transporte"
 
 def enviar_mensaje_telegram(chat_id, mensaje, reply_markup=None):
     try:
@@ -114,6 +117,65 @@ def teclado_volver_telegram():
 
 def aplicacion_disponible():
     return ui_activa
+
+def modo_mantenimiento_activo():
+    return mantenimiento_telegram_activo
+
+def alternar_mantenimiento_telegram():
+    global mantenimiento_telegram_activo
+    mantenimiento_telegram_activo = not mantenimiento_telegram_activo
+
+    estado = "ACTIVA" if mantenimiento_telegram_activo else "INACTIVA"
+    texto_boton = "Desactivar mantención Telegram" if mantenimiento_telegram_activo else "Activar mantención Telegram"
+    color = "#fee2e2" if mantenimiento_telegram_activo else "#ecfdf5"
+    fg = "#991b1b" if mantenimiento_telegram_activo else "#065f46"
+
+    btn_mantencion.config(text=texto_boton)
+    label_mantencion.config(text=f"Mantención Telegram: {estado}", bg=color, fg=fg)
+
+class Tooltip:
+    def __init__(self, widget, texto):
+        self.widget = widget
+        self.texto = texto
+        self.ventana = None
+        widget.bind("<Enter>", self.mostrar)
+        widget.bind("<Leave>", self.ocultar)
+        widget.bind("<Motion>", self.mover)
+
+    def mostrar(self, event=None):
+        if self.ventana:
+            return
+
+        self.ventana = tk.Toplevel(self.widget)
+        self.ventana.wm_overrideredirect(True)
+
+        label = tk.Label(
+            self.ventana,
+            text=self.texto,
+            bg="#111827",
+            fg="white",
+            padx=10,
+            pady=7,
+            font=("Segoe UI", 9),
+            wraplength=300,
+            justify="left",
+            relief="solid",
+            bd=1
+        )
+        label.pack()
+        self.ventana.update_idletasks()
+        self.mover(event)
+
+    def mover(self, event=None):
+        if not self.ventana or event is None:
+            return
+        alto = self.ventana.winfo_reqheight()
+        self.ventana.wm_geometry(f"+{event.x_root + 12}+{event.y_root - alto - 12}")
+
+    def ocultar(self, event=None):
+        if self.ventana:
+            self.ventana.destroy()
+            self.ventana = None
 
 def cerrar_aplicacion():
     global ui_activa
@@ -1504,13 +1566,13 @@ def main():
     global ui_activa
     global ventana, entry_trabajo, entry_nombre, entry_telefono, entry_empresa
     global label_pdf_1, label_pdf_2, label_resultado, label_rpn
-    global btn_iniciar, btn_finalizar
+    global btn_iniciar, btn_finalizar, btn_mantencion, label_mantencion
 
     ventana = tk.Tk()
     ui_activa = True
     ventana.title("Validador Trabajo Programado")
     ventana.protocol("WM_DELETE_WINDOW", cerrar_aplicacion)
-    ventana.geometry("520x700")
+    ventana.geometry("320x760")
     ventana.resizable(False, False)
     ventana.configure(bg="#f3f4f6")
 
@@ -1567,6 +1629,30 @@ def main():
     btn_finalizar.pack(fill="x", pady=(0, 6))
 
     ttk.Button(card, text="📄 Exportar TXT", command=exportar_txt).pack(fill="x", pady=(0, 6))
+
+    label_mantencion = tk.Label(
+        card,
+        text="Mantención Telegram: INACTIVA",
+        bg="#ecfdf5",
+        fg="#065f46",
+        font=("Segoe UI", 9, "bold"),
+        padx=10,
+        pady=5,
+        relief="solid",
+        bd=1
+    )
+    label_mantencion.pack(fill="x", pady=(4, 6))
+
+    btn_mantencion = ttk.Button(
+        card,
+        text="Activar mantención Telegram",
+        command=alternar_mantenimiento_telegram
+    )
+    btn_mantencion.pack(fill="x", pady=(0, 6))
+    Tooltip(
+        btn_mantencion,
+        "SOLO presionar si la aplicación NO está funcionando, ya que este botón desactiva el chat, indicando al usuario que nos llame a nosotros."
+    )
 
     footer = tk.Frame(card, bg="white")
     footer.pack(fill="x", pady=(6, 0))

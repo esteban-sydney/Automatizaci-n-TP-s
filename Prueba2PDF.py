@@ -1,1670 +1,711 @@
-from queue import Queue
-cola_telegram = Queue()
+"""Validador TP: interfaz compacta y navegador en un hilo de trabajo único."""
 
-import tkinter as tk  # noqa: E402
-from tkinter import messagebox, filedialog, ttk  # noqa: E402
-from playwright.sync_api import sync_playwright  # noqa: E402
-from PyPDF2 import PdfReader  # noqa: E402
-import re  # noqa: E402
-from datetime import datetime  # noqa: E402
-import os  # noqa: E402
-import requests  # noqa: E402
-import random  # noqa: E402
-from config import TELEGRAM_TOKEN  # noqa: E402
-import logging  # noqa: E402
+import multiprocessing
+import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
-# Logging básico
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger(__name__)
-
-# =====================
-# CONFIGURACIÓN
-# =====================
-sitio = {
-    "url": "http://portalpsg.gred.entelpcs.cl/index.php",
-    "usuario": "",
-    "password": "",
-    "selector_user": 'input[name="usuario"]',
-    "selector_pass": 'input[name="password"]',
-    "selector_btn_login": 'input[type="submit"]',
-    "post_login_url": "http://portalpsg.gred.entelpcs.cl/tp/ver_planned.php?id="
-}
-
-# =====================
-# VARIABLES GLOBALES
-# =====================
-playwright_inst = None
-browser = None
-page = None
-
-ruta_pdf_1 = ""
-ruta_pdf_2 = ""
-
-tp_validado = False
-tp_iniciado = False
-ui_activa = False
-mantenimiento_telegram_activo = False
-
-texto_bitacora = ""
-datos_tp_actual = {}
-cola_tareas = Queue()
-procesando_tarea = False
-ids_tareas_activas = set()
-pendientes_inicio = {}
-MAX_TAREAS_ACTIVAS = 10
-
-# =====================
-# TELEGRAM
-# =====================
-
-ANEXO_TRANSPORTE = "22 360 2288"
-GROUP_CHAT_ID = -1003951764888
-
-MSG_SITIO_MOVIL = (
-    "El TP ingresado no puede ser iniciado por nosotros, ya que hay un Sitio Móvil involucrado. "
-    "Favor de contactar a Primera Linea de RAN Telegram: +56 9 8761 0440 donde le atenderá un ingeniero especializado."
+from pdf_seguro import cargar_documento, comprobar_documentos
+from psg_core import (
+    ClientePSG,
+    Configuracion,
+    CredencialesRequeridas,
+    ErrorAplicacion,
+    explicar_error,
+    validar_numero,
+    validar_operador,
 )
+from registro_local import InstanciaUnica, Registro, guardar_txt
 
-MSG_MANTENIMIENTO_TELEGRAM = "Chat se encuentra en mantención, favor de llamar al anexo de NOC de Transporte"
 
-def enviar_mensaje_telegram(chat_id, mensaje, reply_markup=None):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": chat_id, "text": mensaje}
-        if reply_markup is None:
-            payload["text"] = (
-                f"{mensaje}\n\n"
-                "Seleccione una opción:\n"
-                "1: Iniciar TP\n"
-                "2: Cerrar TP"
+class Aplicacion:
+    def __init__(self, ventana, cliente=None, registro=None):
+        self.ventana = ventana
+        self.cliente = cliente or ClientePSG()
+        self.registro = registro or Registro()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PSG")
+        self.futuro = None
+        self.ocupada = self.cerrando = self.conectada = False
+        self.config = Configuracion()
+        self.documentos = {}
+        self.validado = self.ultima_bitacora = self.pendiente_bitacora = None
+        self.widgets = []
+        self.crear_interfaz()
+
+    def boton(self, padre, texto, funcion):
+        boton = ttk.Button(padre, text=texto, command=funcion)
+        self.widgets.append(boton)
+        return boton
+
+    def crear_interfaz(self):
+        root = self.ventana
+        root.title("Validador TP")
+        root.configure(bg="white")
+        root.option_add("*Font", ("Segoe UI", 9))
+        card = tk.Frame(root, bg="white", padx=12, pady=10)
+        card.pack(fill="both", expand=True)
+        for col in (0, 1):
+            card.columnconfigure(col, weight=1, uniform="campos")
+        tk.Label(card, text="Validador TP", font=("Segoe UI", 12, "bold"), bg="white").grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        herramientas = ttk.Menubutton(card, text="Herramientas")
+        herramientas.grid(row=0, column=1, sticky="e", pady=(0, 6))
+        menu = tk.Menu(herramientas, tearoff=False)
+        menu.add_command(label="Diagnóstico de conexión", command=self.diagnosticar)
+        menu.add_command(label="Revisar operaciones pendientes", command=self.revisar_pendientes)
+        menu.add_command(
+            label="Recuperar última bitácora pendiente", command=self.recuperar_bitacora
+        )
+        herramientas.config(menu=menu)
+        self.widgets.append(herramientas)
+        tk.Label(card, text="Número TP", bg="white").grid(row=1, column=0, sticky="w")
+        busqueda = tk.Frame(card, bg="white")
+        busqueda.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        busqueda.columnconfigure(0, weight=1)
+        self.numero = tk.StringVar()
+        self.entry_trabajo = ttk.Entry(busqueda, textvariable=self.numero)
+        self.entry_trabajo.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.entry_trabajo.bind("<Return>", lambda event: self.validar())
+        self.numero.trace_add("write", self.invalidar)
+        self.widgets.append(self.entry_trabajo)
+        self.boton(busqueda, "Validar TP", self.validar).grid(row=0, column=1)
+        documentos = tk.Frame(card, bg="white")
+        documentos.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        documentos.columnconfigure(1, weight=1)
+        self.etiquetas_pdf = {}
+        for indice in (1, 2):
+            self.boton(
+                documentos, f"Cargar PDF {indice}", lambda i=indice: self.cargar_pdf(i)
+            ).grid(row=indice - 1, column=0, sticky="ew", padx=(0, 6), pady=2)
+            etiqueta = tk.Label(
+                documentos,
+                text=f"Sin PDF {indice}",
+                bg="white",
+                fg="#b91c1c",
+                width=34,
+                height=2,
+                anchor="w",
+                justify="left",
+                wraplength=275,
             )
-            payload["reply_markup"] = teclado_menu_telegram()
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("Error Telegram:", e)
-
-def notificar_grupo(mensaje):
-    """Notificaciones al grupo deshabilitadas para reiniciar el flujo base."""
-    return
-
-def notificar_admin(mensaje, reply_markup=None):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": GROUP_CHAT_ID, "text": mensaje}
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
-        requests.post(url, json=payload)
-    except Exception as e:
-        print("Error notificacion admin:", e)
-
-def teclado_menu_telegram():
-    return {
-        "keyboard": [[{"text": "1️⃣ Iniciar TP"}, {"text": "2️⃣ Cerrar TP"}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": True,
-        "input_field_placeholder": "Seleccione una opción..."
-    }
-
-def teclado_volver_telegram():
-    return {
-        "keyboard": [[{"text": "↩️ Volver atrás"}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": True,
-        "input_field_placeholder": "Ingrese el dato o vuelva atrás..."
-    }
-
-def aplicacion_disponible():
-    return ui_activa
-
-def modo_mantenimiento_activo():
-    return mantenimiento_telegram_activo
-
-def alternar_mantenimiento_telegram():
-    global mantenimiento_telegram_activo
-    mantenimiento_telegram_activo = not mantenimiento_telegram_activo
-
-    estado = "ACTIVA" if mantenimiento_telegram_activo else "INACTIVA"
-    texto_boton = "Desactivar mantención Telegram" if mantenimiento_telegram_activo else "Activar mantención Telegram"
-    color = "#fee2e2" if mantenimiento_telegram_activo else "#ecfdf5"
-    fg = "#991b1b" if mantenimiento_telegram_activo else "#065f46"
-
-    btn_mantencion.config(text=texto_boton)
-    label_mantencion.config(text=f"Mantención Telegram: {estado}", bg=color, fg=fg)
-
-class Tooltip:
-    def __init__(self, widget, texto):
-        self.widget = widget
-        self.texto = texto
-        self.ventana = None
-        widget.bind("<Enter>", self.mostrar)
-        widget.bind("<Leave>", self.ocultar)
-        widget.bind("<Motion>", self.mover)
-
-    def mostrar(self, event=None):
-        if self.ventana:
-            return
-
-        self.ventana = tk.Toplevel(self.widget)
-        self.ventana.wm_overrideredirect(True)
-
-        label = tk.Label(
-            self.ventana,
-            text=self.texto,
-            bg="#111827",
-            fg="white",
-            padx=10,
-            pady=7,
-            font=("Segoe UI", 9),
-            wraplength=300,
+            etiqueta.grid(row=indice - 1, column=1, sticky="ew", pady=2)
+            self.etiquetas_pdf[indice] = etiqueta
+        self.resultado = tk.Label(
+            card,
+            text="Inicie sesión para consultar PSG.",
+            bg="#f3f4f6",
+            padx=6,
+            pady=4,
+            anchor="w",
             justify="left",
-            relief="solid",
-            bd=1
+            wraplength=380,
+            height=2,
         )
-        label.pack()
-        self.ventana.update_idletasks()
-        self.mover(event)
+        self.resultado.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.rpn = tk.Label(card, text="", bg="#eef2ff", fg="#1e3a8a", padx=6, pady=4, anchor="w")
+        self.rpn.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(2, 6))
+        tk.Label(card, text="Nombre", bg="white").grid(row=6, column=0, sticky="w")
+        tk.Label(card, text="Teléfono", bg="white").grid(row=6, column=1, sticky="w")
+        self.nombre = ttk.Entry(card)
+        self.nombre.grid(row=7, column=0, sticky="ew", padx=(0, 6), pady=(2, 4))
+        self.telefono = ttk.Entry(card)
+        self.telefono.grid(row=7, column=1, sticky="ew", pady=(2, 4))
+        tk.Label(card, text="Empresa (opcional)", bg="white").grid(row=8, column=0, sticky="w")
+        empresa = tk.Frame(card, bg="white")
+        empresa.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(2, 8))
+        empresa.columnconfigure(0, weight=1)
+        self.empresa = ttk.Entry(empresa)
+        self.empresa.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        limpiar = tk.Button(
+            empresa,
+            text="Limpiar datos",
+            command=self.limpiar_datos,
+            bg="#fef3c7",
+            fg="#78350f",
+            activebackground="#fde68a",
+            activeforeground="#78350f",
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground="#f59e0b",
+            highlightcolor="#b45309",
+            cursor="hand2",
+            padx=8,
+            pady=3,
+        )
+        limpiar.grid(row=0, column=1, sticky="ew")
+        self.widgets.extend((self.nombre, self.telefono, self.empresa, limpiar))
+        self.btn_iniciar = self.boton(card, "Iniciar TP", self.iniciar)
+        self.btn_iniciar.grid(row=10, column=0, sticky="ew", padx=(0, 6))
+        self.btn_finalizar = self.boton(card, "Finalizar TP", self.mostrar_finalizar)
+        self.btn_finalizar.grid(row=10, column=1, sticky="ew")
+        self.btn_exportar = self.boton(card, "Exportar TXT", self.exportar)
+        self.btn_exportar.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+        self.boton(card, "Restaurar sesión", self.restaurar_sesion).grid(
+            row=12, column=0, sticky="ew", padx=(0, 6)
+        )
+        ttk.Button(card, text="Cerrar", command=self.cerrar).grid(row=12, column=1, sticky="ew")
+        root.protocol("WM_DELETE_WINDOW", self.cerrar)
+        root.update_idletasks()
+        ancho, alto = max(430, root.winfo_reqwidth()), root.winfo_reqheight() + 12
+        root.geometry(f"{ancho}x{alto}")
+        root.minsize(ancho, alto)
+        self.actualizar_botones()
 
-    def mover(self, event=None):
-        if not self.ventana or event is None:
+    def limpiar_datos(self):
+        if not self.ocupada:
+            for campo in (self.nombre, self.telefono, self.empresa):
+                campo.delete(0, tk.END)
+            self.nombre.focus_set()
+
+    def invalidar(self, *args):
+        self.validado = None
+        self.rpn.config(text="")
+        self.resultado.config(text="Valide el TP para habilitar acciones.", fg="#374151")
+        self.actualizar_botones()
+
+    def actualizar_botones(self):
+        for widget in self.widgets:
+            widget.config(state="disabled" if self.ocupada else "normal")
+        estado = self.validado["estado"] if self.validado else ""
+        vencido = bool(
+            self.validado
+            and datetime.strptime(self.validado["fecha_plan"], "%Y-%m-%d").date()
+            < datetime.now().date()
+        )
+        self.btn_iniciar.config(
+            state="normal"
+            if not self.ocupada and estado == "PLANIFICADO" and not vencido
+            else "disabled"
+        )
+        self.btn_finalizar.config(
+            state="normal"
+            if not self.ocupada and estado in ("EJECUCION", "EN EJECUCION")
+            else "disabled"
+        )
+        self.btn_exportar.config(
+            state="normal" if not self.ocupada and self.ultima_bitacora else "disabled"
+        )
+
+    def ejecutar(self, tarea, exito, mensaje="Consultando PSG…", error=None):
+        if self.ocupada or self.cerrando:
+            return False
+        self.ocupada = True
+        self.resultado.config(text=mensaje, fg="#374151")
+        self.actualizar_botones()
+        self.futuro = self.executor.submit(tarea)
+
+        def recoger():
+            if not self.futuro.done():
+                self.ventana.after(80, recoger)
+                return
+            futuro, self.futuro = self.futuro, None
+            self.ocupada = False
+            try:
+                respuesta = futuro.result()
+            except Exception as causa:
+                self.validado = None
+                self.resultado.config(
+                    text="No se completó la operación. Revise el detalle.", fg="#b91c1c"
+                )
+                if error and not self.cerrando:
+                    error(causa)
+                elif not self.cerrando:
+                    messagebox.showerror(
+                        "Operación no completada", explicar_error(causa), parent=self.ventana
+                    )
+            else:
+                if not self.cerrando:
+                    exito(respuesta)
+            finally:
+                self.actualizar_botones()
+                if self.cerrando:
+                    self.terminar_cierre()
+
+        self.ventana.after(80, recoger)
+        return True
+
+    def restaurar_sesion(self):
+        if self.ocupada or self.cerrando:
             return
-        alto = self.ventana.winfo_reqheight()
-        self.ventana.wm_geometry(f"+{event.x_root + 12}+{event.y_root - alto - 12}")
+        self.invalidar()
+        self.conectada = False
+        config = self.config
 
-    def ocultar(self, event=None):
-        if self.ventana:
-            self.ventana.destroy()
-            self.ventana = None
+        def listo(mensaje):
+            self.conectada = True
+            self.resultado.config(text=mensaje, fg="#166534")
 
-def cerrar_aplicacion():
-    global ui_activa
-    ui_activa = False
-    ventana.destroy()
+        def fallo(causa):
+            if isinstance(causa, CredencialesRequeridas):
+                self.resultado.config(text=str(causa), fg="#b45309")
+                self.ventana.after_idle(self.mostrar_login)
+            else:
+                messagebox.showerror("Restaurar sesión", explicar_error(causa), parent=self.ventana)
 
-# =====================
-# LOGIN
-# =====================
-def mostrar_login():
-    login = tk.Toplevel()
-    login.title("Login Operador")
-    login.geometry("320x220")
-    login.resizable(False, False)
-    login.grab_set()
+        self.ejecutar(
+            lambda: self.cliente.restaurar_sesion(config),
+            listo,
+            "Intentando recuperar la sesión de PSG…",
+            fallo,
+        )
 
-    tk.Label(login, text="Usuario Portal").pack(pady=(20, 5))
-    entry_user = tk.Entry(login)
-    entry_user.pack()
-
-    tk.Label(login, text="Contraseña Portal").pack(pady=(10, 5))
-    entry_pass = tk.Entry(login, show="*")
-    entry_pass.pack()
-
-    def ingresar():
-        user = entry_user.get().strip()
-        pwd = entry_pass.get().strip()
-
-        if not user or not pwd:
-            messagebox.showwarning("Atención", "Ingrese usuario y contraseña")
+    def mostrar_login(self):
+        if self.ocupada or self.cerrando:
             return
+        self.invalidar()
+        modal = tk.Toplevel(self.ventana)
+        modal.title("Acceso a PSG")
+        modal.resizable(False, False)
+        modal.transient(self.ventana)
+        modal.grab_set()
+        panel = ttk.Frame(modal, padding=16)
+        panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="Usuario del portal").pack(anchor="w")
+        usuario = ttk.Entry(panel, width=36)
+        usuario.pack(fill="x", pady=(3, 8))
+        ttk.Label(panel, text="Contraseña").pack(anchor="w")
+        clave = ttk.Entry(panel, show="*")
+        clave.pack(fill="x", pady=(3, 8))
+        http = tk.BooleanVar(value=self.config.permitir_http)
+        ttk.Checkbutton(panel, text="Usar HTTP para PSG antiguo", variable=http).pack(anchor="w")
+        ttk.Label(
+            panel,
+            text="HTTPS es la opción predeterminada. HTTP no cifra\nlas credenciales: úselo solo si TI autoriza ese acceso.",
+            foreground="#78350f",
+        ).pack(anchor="w", pady=(3, 10))
 
-        sitio["usuario"] = user
-        sitio["password"] = pwd
+        def entrar():
+            user, password = usuario.get().strip(), clave.get()
+            if not user or not password:
+                messagebox.showwarning(
+                    "Datos incompletos", "Ingrese usuario y contraseña.", parent=modal
+                )
+                return
+            config = Configuracion(permitir_http=http.get())
+            self.config = config
+            self.conectada = False
+            ingresar.config(state="disabled")
+            clave.delete(0, tk.END)
+            usuario.config(state="disabled")
+            clave.config(state="disabled")
 
-        try:
-            iniciar_navegador()
-            login.destroy()
-        except Exception as e:
-            messagebox.showerror("Error", f"No fue posible iniciar sesión:\n{str(e)}")
+            def conectado(mensaje):
+                self.config = config
+                self.conectada = True
+                if modal.winfo_exists():
+                    modal.destroy()
+                self.resultado.config(text=mensaje, fg="#166534")
 
-    ttk.Button(login, text="Ingresar", command=ingresar).pack(pady=20)
+            def fallo(causa):
+                if modal.winfo_exists():
+                    ingresar.config(state="normal")
+                    usuario.config(state="normal")
+                    clave.config(state="normal")
+                    clave.focus_set()
+                    messagebox.showerror(
+                        "Acceso no confirmado", explicar_error(causa), parent=modal
+                    )
 
-# =====================
-# PLAYWRIGHT
-# =====================
-def hacer_login():
-    page.goto(sitio["url"])
-    page.fill(sitio["selector_user"], sitio["usuario"])
-    page.fill(sitio["selector_pass"], sitio["password"])
-    page.click(sitio["selector_btn_login"])
-    page.wait_for_timeout(2000)
+            self.ejecutar(
+                lambda: self.cliente.login(user, password, config),
+                conectado,
+                "Comprobando acceso a PSG…",
+                fallo,
+            )
 
-def iniciar_navegador():
-    global playwright_inst, browser, page
+        ingresar = ttk.Button(panel, text="Ingresar", command=entrar)
+        ingresar.pack(fill="x")
+        modal.bind("<Return>", lambda event: entrar() if not self.ocupada else None)
+        usuario.focus_set()
 
-    playwright_inst = sync_playwright().start()
-
-    browser = playwright_inst.chromium.launch(
-        channel="msedge",
-        headless=False,
-        args=[
-            "--start-maximized",
-            "--disable-blink-features=AutomationControlled"
-        ],
-        ignore_default_args=["--enable-automation"]
-    )
-
-    context = browser.new_context(no_viewport=True)
-    page = context.new_page()
-    page.set_default_timeout(10000)
-    hacer_login()
-
-def restaurar_sesion():
-    try:
-        hacer_login()
-        messagebox.showinfo("Sesión", "Sesión restaurada correctamente ✅")
-    except Exception as e:
-        logger.exception("Error al restaurar sesión: %s", e)
-        try:
-            if browser:
-                browser.close()
-            if playwright_inst:
-                playwright_inst.stop()
-        except Exception as e2:
-            logger.exception("Error cerrando navegador: %s", e2)
-        iniciar_navegador()
-
-# =====================
-# PDF
-# =====================
-def buscar_en_pdf(numero):
-    rutas = [ruta_pdf_1, ruta_pdf_2]
-
-    for ruta in rutas:
+    def cargar_pdf(self, indice):
+        if self.ocupada:
+            return
+        ruta = filedialog.askopenfilename(parent=self.ventana, filetypes=[("PDF", "*.pdf")])
         if not ruta:
-            continue
+            return
+        self.invalidar()
+
+        def listo(documento):
+            self.documentos[indice] = documento
+            self.etiquetas_pdf[indice].config(text=Path(documento["ruta"]).name, fg="#166534")
+            self.resultado.config(text="PDF cargado y comprobado. Valide el TP.", fg="#166534")
+
+        self.ejecutar(lambda: cargar_documento(ruta), listo, "Leyendo PDF de forma aislada…")
+
+    def validar(self):
+        if self.ocupada:
+            return
+        self.invalidar()
         try:
-            reader = PdfReader(ruta)
-            texto = ""
-            for p in reader.pages:
-                contenido = p.extract_text()
-                if contenido:
-                    texto += contenido
-            if numero in texto:
-                return True
-        except Exception as e:
-            logger.exception("Error leyendo PDF %s: %s", ruta, e)
-
-    return False
-
-def cargar_pdf_1():
-    global ruta_pdf_1
-    archivo = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
-    if archivo:
-        ruta_pdf_1 = archivo
-        label_pdf_1.config(text=f"📄 {os.path.basename(archivo)}", fg="green")
-
-def cargar_pdf_2():
-    global ruta_pdf_2
-    archivo = filedialog.askopenfilename(filetypes=[("PDF", "*.pdf")])
-    if archivo:
-        ruta_pdf_2 = archivo
-        label_pdf_2.config(text=f"📄 {os.path.basename(archivo)}", fg="green")
-
-# =====================
-# EXTRACCIÓN DATOS
-# =====================
-def extraer_valor_por_encabezado(nombre_encabezado):
-    try:
-        return page.evaluate(
-            """(nombre) => {
-                const limpiar = (txt) => (txt || '').replace(/\\s+/g, ' ').trim();
-                const normalizar = (txt) => limpiar(txt).toLowerCase();
-                const objetivo = normalizar(nombre);
-
-                for (const tabla of Array.from(document.querySelectorAll('table'))) {
-                    const filas = Array.from(tabla.querySelectorAll('tr')).map((fila) =>
-                        Array.from(fila.querySelectorAll('th,td')).map((celda) => limpiar(celda.innerText))
-                    );
-
-                    for (let f = 0; f < filas.length; f++) {
-                        for (let c = 0; c < filas[f].length; c++) {
-                            if (normalizar(filas[f][c]) === objetivo) {
-                                const valores = [];
-                                for (let siguiente = f + 1; siguiente < filas.length; siguiente++) {
-                                    const valor = filas[siguiente][c];
-                                    if (valor && !valores.includes(valor)) valores.push(valor);
-                                }
-
-                                if (valores.length) return valores.join(' | ');
-
-                                const valorDerecha = filas[f][c + 1];
-                                if (valorDerecha) return valorDerecha;
-                            }
-                        }
-                    }
-                }
-
-                return 'N/A';
-            }""",
-            nombre_encabezado
-        )
-    except Exception as e:
-        logger.exception("Error extrayendo encabezado %s: %s", nombre_encabezado, e)
-        return "N/A"
-
-def extraer_datos_trabajo():
-    titulo = page.locator("h1").inner_text().strip()
-    m = re.search(r"\d+", titulo)
-    if not m:
-        logger.error("No se encontró número TP en título: %s", titulo)
-        raise ValueError("Número TP no encontrado en título")
-    numero = m.group()
-
-    tabla = page.locator("table.sample").first
-    fila = tabla.locator("tr").nth(1)
-
-    desc_raw = fila.locator("td").nth(0).inner_text().strip()
-    match = re.search(r":\s*(.*?)\s*:", desc_raw)
-    descripcion = match.group(1) if match else desc_raw
-
-    try:
-        rpn = int(fila.locator("td").nth(2).inner_text().strip())
-    except Exception as e:
-        logger.exception("Error parseando RPN: %s", e)
-        rpn = 0
-
-    try:
-        fecha_raw = fila.locator("td").nth(4).inner_text().strip()
-        fecha_obj = datetime.strptime(fecha_raw, "%Y-%m-%d %H:%M:%S")
-        fecha_plan = fecha_obj.strftime("%Y-%m-%d")
-    except Exception as e:
-        logger.exception("Error parseando fecha: %s", e)
-        fecha_plan = "N/A"
-
-    estado = fila.locator("td").nth(3).inner_text().strip().upper()
-    lugar = extraer_valor_por_encabezado("Lugar")
-
-    return {
-        "numero": numero,
-        "titulo": titulo,
-        "descripcion": descripcion,
-        "rpn": rpn,
-        "fecha_plan": fecha_plan,
-        "estado": estado,
-        "lugar": lugar
-    }
-
-def obtener_aviso_lugar():
-    lugar = datos_tp_actual.get("lugar", "N/A")
-    if lugar and lugar != "N/A":
-        return f"📍 Lugar: {lugar}\n"
-    return "📍 Lugar: No encontrado\n"
-
-def validar_fecha_plan_hoy(datos=None):
-    info = datos or datos_tp_actual
-    fecha_plan = info.get("fecha_plan", "N/A")
-    fecha_hoy = datetime.now().date()
-    try:
-        fecha_tp = datetime.strptime(fecha_plan, "%Y-%m-%d").date()
-    except Exception:
-        return False, fecha_plan, fecha_hoy.strftime("%Y-%m-%d")
-    return fecha_tp == fecha_hoy, fecha_plan, fecha_hoy.strftime("%Y-%m-%d")
-
-def mensaje_fecha_plan_no_corresponde(numero_tp):
-    _, fecha_plan, fecha_hoy = validar_fecha_plan_hoy()
-    return (
-        f"⚠️ TP {numero_tp} no corresponde a la fecha actual.\n\n"
-        f"📅 Fecha planificación: {fecha_plan}\n"
-        f"📅 Fecha actual: {fecha_hoy}\n\n"
-        "Solo se pueden iniciar TP planificados para el día de hoy."
-    )
-
-def obtener_aviso_rpn():
-    rpn = datos_tp_actual.get("rpn", "N/A")
-    return f"🔢 RPN: {rpn}\n"
-
-def obtener_aviso_rpn_bloqueado():
-    if rpn_es_2500():
-        return "🔢 RPN: 2500\n"
-    return ""
-
-def rpn_es_2500():
-    return datos_tp_actual.get("rpn") == 2500
-
-def lugar_es_sitios():
-    lugar = datos_tp_actual.get("lugar", "")
-    lugares = [valor.strip().upper() for valor in lugar.split("|")]
-    return "SITIOS" in lugares
-
-PALABRAS_BLOQUEO_TP = [
-    "WDM",
-    "RTN",
-    "SATELITAL",
-    "MHL3000",
-    "OSN1800",
-    "OSN 1800",
-    "OSN3500",
-    "OSN 3500",
-    "OSN9800",
-    "OSN 9800",
-    "OSN8800",
-    "OSN 8800",
-    "Red Acceso FO RM",
-    "Intervencion de Mufa",
-    "OLT",
-    "RED GPON",
-]
-
-def obtener_aviso_wdm():
-    try:
-        texto_pagina = page.locator("body").inner_text().upper()
-    except Exception as e:
-        logger.exception("Error leyendo página para aviso palabras bloqueo TP: %s", e)
-        try:
-            texto_pagina = page.content().upper()
-        except Exception as e2:
-            logger.exception("Error obteniendo contenido de página: %s", e2)
-            texto_pagina = ""
-
-    try:
-        titulo = page.locator("h1").inner_text().upper()
-        texto_pagina += " " + titulo
-    except Exception:
-        pass
-
-    for palabra in PALABRAS_BLOQUEO_TP:
-        if palabra in texto_pagina:
-            return f"🔎 {palabra}: Detectado en la página del TP\n"
-
-    return ""
-
-# =====================
-# VALIDAR TP — retorna estado string
-# =====================
-def ejecutar_validacion(event=None):
-    global tp_validado, datos_tp_actual
-
-    numero = entry_trabajo.get().strip()
-
-    if not numero:
-        messagebox.showwarning("Atención", "Ingrese número TP")
-        return None
-
-    if not ruta_pdf_1 and not ruta_pdf_2:
-        messagebox.showwarning("Atención", "Debe cargar al menos un PDF")
-        return "SIN_PDF"
-
-    if not buscar_en_pdf(numero):
-        label_resultado.config(text="❌ TP no existe en PDFs", fg="red")
-        return "NO_PDF"
-
-    try:
-        page.goto(sitio["post_login_url"] + numero)
-        page.wait_for_timeout(2000)
-
-        datos = extraer_datos_trabajo()
-        datos_tp_actual = datos
-        estado = datos["estado"]
-
-        btn_iniciar.config(state="disabled")
-        btn_finalizar.config(state="disabled")
-
-        if estado == "POSPUESTO":
-            label_resultado.config(text="❌ TP POSPUESTO", fg="orange")
-            return "POSPUESTO"
-
-        if estado == "EN GESTION":
-            label_resultado.config(text="❌ TP EN GESTION", fg="orange")
-            return "EN_GESTION"
-
-        if estado == "EJECUTADO":
-            label_resultado.config(text="❌ TP EJECUTADO", fg="red")
-            return "EJECUTADO"
-
-        if "EJECUCION" in estado:
-            label_resultado.config(text="⚠️ TP EN EJECUCIÓN", fg="orange")
-            label_rpn.config(
-                text=f"RPN: {datos['rpn']} | 📅 {datos['fecha_plan']}",
-                fg="blue"
-            )
-            btn_finalizar.config(state="normal")
-            tp_validado = True
-            return "EN_EJECUCION"
-
-        color_fecha = "green"
-        try:
-            fecha_tp = datetime.strptime(datos["fecha_plan"], "%Y-%m-%d").date()
-            if fecha_tp != datetime.now().date():
-                color_fecha = "red"
-        except:  # noqa: E722
-            pass
-
-        label_resultado.config(text=f"✅ TP VALIDADO ({estado})", fg="green")
-        label_rpn.config(
-            text=f"RPN: {datos['rpn']} | 📅 {datos['fecha_plan']}",
-            fg=color_fecha
-        )
-
-        if "PLANIFICADO" in estado:
-            btn_iniciar.config(state="normal")
-
-        tp_validado = True
-        return "PLANIFICADO"
-
-    except Exception as e:
-        messagebox.showerror("Error", f"No fue posible validar TP:\n{str(e)}")
-        return "ERROR"
-
-# =====================
-# BITÁCORA INICIO
-# =====================
-def insertar_bitacora():
-    global texto_bitacora
-
-    nombre = entry_nombre.get().strip()
-    telefono = entry_telefono.get().strip()
-    empresa = entry_empresa.get().strip()
-
-    if not nombre or not telefono:
-        messagebox.showwarning("Atención", "Nombre y teléfono obligatorios")
-        return False
-
-    hora = datetime.now().strftime("%H:%M")
-    texto_bitacora = f"{nombre}, Cel {telefono}"
-
-    if empresa:
-        texto_bitacora += f", Empresa {empresa}"
-
-    texto_bitacora += f" inicia TP a las {hora} hrs"
-
-    try:
-        page.click("text=Documentar desarrollo de trabajo")
-        page.wait_for_timeout(1500)
-
-        textarea = page.locator("textarea").first
-        textarea.click()
-        page.keyboard.type(texto_bitacora, delay=20)
-        page.click("input[type='submit']")
-        page.wait_for_timeout(2000)
-
-        return True
-
-    except Exception as e:
-        messagebox.showerror("Bitácora", f"No fue posible documentar:\n{str(e)}")
-        return False
-
-# =====================
-# INICIAR TP
-# =====================
-def iniciar_tp():
-    global tp_iniciado
-
-    if not tp_validado:
-        messagebox.showwarning("Atención", "Debe validar TP")
-        return False
-
-    try:
-        datos = extraer_datos_trabajo()
-        fecha_ok, fecha_plan, fecha_hoy = validar_fecha_plan_hoy(datos)
-        if not fecha_ok:
-            messagebox.showerror(
-                "Bloqueado",
-                "No puede iniciar un TP que no corresponde a la fecha actual.\n\n"
-                f"Fecha planificación: {fecha_plan}\n"
-                f"Fecha actual: {fecha_hoy}"
-            )
-            return False
-    except Exception as e:
-        logger.exception("No fue posible validar fecha de planificación: %s", e)
-        messagebox.showerror("Bloqueado", "No fue posible validar la fecha de planificación del TP")
-        return False
-
-    try:
-        page.click("text=Iniciar Ejecucion")
-        page.wait_for_timeout(1500)
-        page.click("input[type='submit']")
-        page.wait_for_timeout(2000)
-
-        ok = insertar_bitacora()
-        if not ok:
-            return False
-
-        tp_iniciado = True
-        btn_iniciar.config(state="disabled")
-        btn_finalizar.config(state="normal")
-        return True
-
-    except Exception as e:
-        messagebox.showerror("Error", f"No fue posible iniciar TP:\n{str(e)}")
-        return False
-
-# =====================
-# MODAL FINALIZAR TP (uso manual desde UI)
-# =====================
-def mostrar_finalizar_tp(nombre_inicial="", telefono_inicial="", auto_confirmar=False, on_result=None, mostrar_error=True):
-    if not auto_confirmar and not nombre_inicial:
-        nombre_inicial = entry_nombre.get().strip()
-    if not auto_confirmar and not telefono_inicial:
-        telefono_inicial = entry_telefono.get().strip()
-
-    if not tp_validado:
-        if mostrar_error:
-            messagebox.showwarning("Atención", "Debe validar TP primero")
-        if on_result:
-            on_result(False)
-        return
-
-    datos = extraer_datos_trabajo()
-
-    if "EJECUCION" not in datos["estado"]:
-        if mostrar_error:
-            messagebox.showwarning("Estado inválido", "El TP no está en ejecución")
-        if on_result:
-            on_result(False)
-        return
-
-    ventana_cierre = tk.Toplevel()
-    ventana_cierre.title("Finalizar TP")
-    ventana_cierre.geometry("320x240")
-    ventana_cierre.resizable(False, False)
-    ventana_cierre.grab_set()
-
-    tk.Label(ventana_cierre, text="Nombre quien finaliza").pack(pady=(20, 5))
-    entry_nombre_cierre = tk.Entry(ventana_cierre)
-    entry_nombre_cierre.pack(fill="x", padx=20)
-    if nombre_inicial:
-        entry_nombre_cierre.insert(0, nombre_inicial)
-
-    tk.Label(ventana_cierre, text="Teléfono").pack(pady=(12, 5))
-    entry_telefono_cierre = tk.Entry(ventana_cierre)
-    entry_telefono_cierre.pack(fill="x", padx=20)
-    if telefono_inicial:
-        entry_telefono_cierre.insert(0, telefono_inicial)
-
-    def confirmar_cierre():
-        nombre = entry_nombre_cierre.get().strip()
-        telefono = entry_telefono_cierre.get().strip()
-
-        if not nombre or not telefono:
-            if mostrar_error:
-                messagebox.showwarning("Atención", "Debe ingresar nombre y teléfono")
-            if on_result:
-                on_result(False)
+            numero = validar_numero(self.numero.get().strip())
+            if not self.conectada:
+                raise ErrorAplicacion("Inicie sesión en PSG primero.")
+            documentos = tuple(self.documentos.values())
+        except Exception as error:
+            messagebox.showwarning("Validación", explicar_error(error), parent=self.ventana)
             return
 
-        ok = finalizar_tp(nombre, telefono, mostrar_error=mostrar_error)
-        ventana_cierre.destroy()
-        if on_result:
-            on_result(ok)
-
-    ttk.Button(ventana_cierre, text="🔒 Confirmar cierre", command=confirmar_cierre).pack(pady=28)
-    if auto_confirmar:
-        ventana_cierre.after(500, confirmar_cierre)
-
-
-def completar_formulario_cierre(nombre, telefono, texto_cierre):
-    """Completa el formulario web de cierre usando campos separados o textarea."""
-    comentario = page.locator("textarea[name='comentario']").first
-    inventario_datos = page.locator("textarea[name='inventario_datos']").first
-
-    comentario_ok = comentario.count() > 0
-    inventario_ok = inventario_datos.count() > 0
-
-    if comentario_ok:
-        comentario.fill(texto_cierre)
-
-    if inventario_ok:
-        inventario_datos.fill("..")
-
-    if comentario_ok or inventario_ok:
-        return
-
-    campos_nombre = [
-        "input[name*='nombre' i]",
-        "input[id*='nombre' i]",
-        "input[name*='responsable' i]",
-        "input[id*='responsable' i]",
-        "input[name*='usuario' i]",
-        "input[id*='usuario' i]",
-    ]
-    campos_telefono = [
-        "input[name*='fono' i]",
-        "input[id*='fono' i]",
-        "input[name*='telef' i]",
-        "input[id*='telef' i]",
-        "input[name*='cel' i]",
-        "input[id*='cel' i]",
-    ]
-
-    nombre_ok = False
-    telefono_ok = False
-
-    for selector in campos_nombre:
-        campo = page.locator(selector).first
-        if campo.count() > 0:
-            campo.fill(nombre)
-            nombre_ok = True
-            break
-
-    for selector in campos_telefono:
-        campo = page.locator(selector).first
-        if campo.count() > 0:
-            campo.fill(telefono)
-            telefono_ok = True
-            break
-
-    if nombre_ok or telefono_ok:
-        return
-
-    textarea_final = page.locator("textarea").first
-    textarea_final.click()
-    page.keyboard.type(texto_cierre, delay=20)
-
-
-def click_primero_disponible(selectores):
-    for selector in selectores:
-        locator = page.locator(selector).first
-        if locator.count() > 0:
-            locator.click()
-            return True
-    return False
-
-# =====================
-# FINALIZAR TP (llamado directo desde Telegram o modal)
-# =====================
-def finalizar_tp(nombre, telefono, mostrar_error=True):
-    hora = datetime.now().strftime("%H:%M")
-    texto_cierre = f"{nombre}, Cel {telefono} finaliza TP a las {hora} hrs"
-
-    try:
-        print(f"🔒 Iniciando cierre TP con nombre={nombre} telefono={telefono}")
-        datos = extraer_datos_trabajo()
-        numero_tp = datos["numero"]
-
-        # Documentar en bitácora
-        page.click("text=Documentar desarrollo de trabajo")
-        page.wait_for_timeout(1500)
-
-        textarea = page.locator("textarea").first
-        textarea.click()
-        page.keyboard.type(texto_cierre, delay=20)
-        page.click("input[type='submit']")
-        page.wait_for_timeout(2000)
-
-        # Volver al TP y finalizar
-        page.goto(sitio["post_login_url"] + numero_tp)
-        page.wait_for_timeout(2000)
-
-        if not click_primero_disponible([
-            "text=Finalizar Ejecucion",
-            "text=Finalizar Ejecución",
-            "input[value*='Finalizar Ejecucion' i]",
-            "input[value*='Finalizar Ejecución' i]",
-            "button:has-text('Finalizar Ejecucion')",
-            "button:has-text('Finalizar Ejecución')",
-        ]):
-            raise Exception("No se encontró el botón Finalizar Ejecucion")
-        page.wait_for_timeout(1500)
-
-        completar_formulario_cierre(nombre, telefono, texto_cierre)
-
-        if not click_primero_disponible([
-            "input[name='accion'][value='Confirmar']",
-            "input[value*='Confirmar' i]",
-            "button:has-text('Confirmar')",
-            "text=Confirmar",
-        ]):
-            raise Exception("No se encontró el botón Confirmar")
-        page.wait_for_timeout(2500)
-
-        btn_finalizar.config(state="disabled")
-        print(f"✅ Cierre TP {numero_tp} completado")
-        return True
-
-    except Exception as e:
-        logger.exception("No fue posible finalizar TP: %s", e)
-        if mostrar_error:
-            messagebox.showerror("Error", f"No fue posible finalizar TP:\n{str(e)}")
-        return False
-
-# =====================
-# EXPORTAR TXT
-# =====================
-def exportar_txt():
-    if not tp_iniciado:
-        messagebox.showwarning("Atención", "Debe iniciar TP primero")
-        return
-
-    try:
-        datos = extraer_datos_trabajo()
-        ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bitacora_tp.txt")
-
-        linea = (
-            f"TP {datos['numero']} {datos['descripcion']}:\n"
-            f"{texto_bitacora}\n\n"
-        )
-
-        with open(ruta, "a", encoding="utf-8") as archivo:
-            archivo.write(linea)
-
-        os.startfile(ruta)
-
-    except Exception as e:
-        messagebox.showerror("Error", f"No se pudo exportar:\n{str(e)}")
-
-def marcar_tp_finalizado_txt(numero_tp):
-    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bitacora_tp.txt")
-
-    try:
-        if not os.path.exists(ruta):
-            logger.warning("No existe bitacora_tp.txt para marcar TP %s como finalizado", numero_tp)
-            return False
-
-        with open(ruta, "r", encoding="utf-8") as archivo:
-            lineas = archivo.readlines()
-
-        marcador = "//finalizado"
-        actualizado = False
-        patron_tp = re.compile(rf"\bTP\s+{re.escape(str(numero_tp))}\b")
-
-        for i, linea in enumerate(lineas):
-            if patron_tp.search(linea) and marcador not in linea:
-                lineas[i] = linea.rstrip("\r\n") + f" {marcador}\n"
-                actualizado = True
-                break
-
-        if not actualizado:
-            logger.warning("No se encontró TP %s sin marcar en bitacora_tp.txt", numero_tp)
-            return False
-
-        with open(ruta, "w", encoding="utf-8") as archivo:
-            archivo.writelines(lineas)
-
-        return True
-
-    except Exception as e:
-        logger.exception("No se pudo marcar TP %s como finalizado en TXT: %s", numero_tp, e)
-        return False
-
-# =====================
-# PROCESAR COLA TELEGRAM
-# =====================
-def actualizar_estado_telegram(estado_ref, **nuevo_estado):
-    if isinstance(estado_ref, dict):
-        estado_ref.clear()
-        if nuevo_estado.get("paso") in {"numero", "nombre", "telefono", "empresa"}:
-            nuevo_estado["ultimo_paso_en"] = datetime.now()
-        estado_ref.update(nuevo_estado)
-
-def generar_id_tarea(accion):
-    prefijo = "INI" if accion == "iniciar" else "CIE"
-    for _ in range(900):
-        tarea_id = f"{prefijo}-{random.randint(100, 999)}"
-        if tarea_id not in ids_tareas_activas:
-            ids_tareas_activas.add(tarea_id)
-            return tarea_id
-    timestamp = datetime.now().strftime("%H%M%S")
-    tarea_id = f"{prefijo}-{timestamp[-3:]}"
-    ids_tareas_activas.add(tarea_id)
-    return tarea_id
-
-def total_tareas_activas():
-    return cola_tareas.qsize() + len(pendientes_inicio) + (1 if procesando_tarea else 0)
-
-def enviar_solicitud_inicio_admin(datos):
-    tp_info = datos.get("tp_info", {})
-    empresa = datos.get("empresa", "") or "No informada"
-    tarea_id = datos["tarea_id"]
-    accion_texto = "inicio" if datos.get("accion") == "iniciar" else "cierre"
-    notificar_admin(
-        f"Solicitud de {accion_texto} de TP {datos['numero']} ID {tarea_id}\n\n"
-        f"📄 Descripción: {tp_info.get('descripcion', 'N/A')}\n"
-        f"🔢 RPN: {tp_info.get('rpn', 'N/A')}\n"
-        f"📅 Fecha plan: {tp_info.get('fecha_plan', 'N/A')}\n"
-        f"👤 Solicitante: {datos['nombre']}\n"
-        f"📱 Teléfono: {datos['telefono']}\n"
-        f"🏢 Empresa: {empresa}\n\n"
-        f"Responder:\n"
-        f"/SI {tarea_id}\n"
-        f"/NO {tarea_id}",
-        reply_markup={
-            "inline_keyboard": [[
-                {"text": f"✅ SI {tarea_id}", "callback_data": f"SI:{tarea_id}"},
-                {"text": f"❌ NO {tarea_id}", "callback_data": f"NO:{tarea_id}"}
-            ]]
-        }
-    )
-
-def aprobar_inicio_pendiente(tarea_id):
-    tarea_id = tarea_id.strip().upper()
-    datos = pendientes_inicio.pop(tarea_id, None)
-    if not datos:
-        return False, f"No hay solicitud pendiente con ID {tarea_id}."
-
-    datos["aprobado_admin"] = True
-    cola_telegram.put(datos)
-    accion_admin = "INICIO_APROBADO" if datos.get("accion") == "iniciar" else "CIERRE_APROBADO"
-    print(f"✅ {accion_admin} {tarea_id} enviado a cola_telegram — tamaño: {cola_telegram.qsize()}")
-    notificar_admin(f"✅ {accion_admin} {tarea_id} TP {datos['numero']}")
-    return True, f"✅ Solicitud {tarea_id} aprobada. Entró al flujo de atención."
-
-def obtener_unico_inicio_pendiente():
-    if len(pendientes_inicio) == 1:
-        return next(iter(pendientes_inicio))
-    return None
-
-def rechazar_inicio_pendiente(tarea_id):
-    tarea_id = tarea_id.strip().upper()
-    datos = pendientes_inicio.pop(tarea_id, None)
-    if not datos:
-        return False, f"No hay solicitud pendiente con ID {tarea_id}."
-
-    ids_tareas_activas.discard(tarea_id)
-    actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
-    enviar_mensaje_telegram(
-        datos.get("chat_id"),
-        f"⚠️ Tu solicitud {datos['numero']} no fue aprobada.\n"
-        f"Por favor contacta al anexo {ANEXO_TRANSPORTE}."
-    )
-    accion_admin = "INICIO_RECHAZADO" if datos.get("accion") == "iniciar" else "CIERRE_RECHAZADO"
-    notificar_admin(f"❌ {accion_admin} {tarea_id} TP {datos['numero']}")
-    return True, f"❌ Solicitud {tarea_id} rechazada."
-
-def recibir_tarea_telegram(datos):
-    if total_tareas_activas() >= MAX_TAREAS_ACTIVAS:
-        actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
-        enviar_mensaje_telegram(
-            datos.get("chat_id"),
-            "⚠️ En este momento hay muchas solicitudes en espera.\n\n"
-            f"Por favor intenta nuevamente en unos minutos. Si es urgente, contacta al anexo {ANEXO_TRANSPORTE}."
-        )
-        return
-
-    tarea_id = datos.get("tarea_id") or generar_id_tarea(datos.get("accion"))
-    datos["tarea_id"] = tarea_id
-
-    if datos.get("accion") in ("iniciar", "cerrar") and not datos.get("aprobado_admin"):
-        pendientes_inicio[tarea_id] = datos
-        actualizar_estado_telegram(
-            datos.get("estado_ref"),
-            paso="esperando_aprobacion_inicio",
-            accion=datos.get("accion"),
-            numero=datos.get("numero"),
-            tarea_id=tarea_id
-        )
-        enviar_solicitud_inicio_admin(datos)
-        enviar_mensaje_telegram(
-            datos.get("chat_id"),
-            f"⏳ Tu solicitud {datos['numero']} está siendo validada.\n"
-            "Favor atento a esta conversación.",
-            reply_markup={"remove_keyboard": True}
-        )
-        return
-
-    cola_tareas.put(datos)
-    print(f"📥 Tarea {tarea_id} en cola_tareas — tamaño: {cola_tareas.qsize()}")
-    actualizar_estado_telegram(
-        datos.get("estado_ref"),
-        paso="en_cola",
-        accion=datos.get("accion"),
-        numero=datos.get("numero"),
-        tarea_id=tarea_id
-    )
-
-    if procesando_tarea:
-        enviar_mensaje_telegram(
-            datos.get("chat_id"),
-            f"⏳ Solicitud {tarea_id} recibida.\n\n"
-            "En este momento se están procesando solicitudes previas de otros colegas. "
-            "Te avisaremos por este chat cuando comience tu atención.",
-            reply_markup={"remove_keyboard": True}
-        )
-    else:
-        enviar_mensaje_telegram(
-            datos.get("chat_id"),
-            f"✅ Solicitud {tarea_id} recibida.\n\n"
-            "Será procesada a continuación.",
-            reply_markup={"remove_keyboard": True}
-        )
-
-def finalizar_tarea(datos):
-    global procesando_tarea
-    tarea_id = datos.get("tarea_id")
-    if tarea_id:
-        ids_tareas_activas.discard(tarea_id)
-    procesando_tarea = False
-    ventana.after(500, procesar_cola_telegram)
-
-def responder_prevalidacion_telegram(datos):
-    chat_id = datos.get("chat_id")
-    estado_ref = datos.get("estado_ref")
-    numero_tp = datos.get("numero")
-    accion = datos.get("accion")
-
-    entry_trabajo.delete(0, tk.END)
-    entry_trabajo.insert(0, numero_tp)
-
-    estado_tp = ejecutar_validacion()
-    aviso_wdm = ""
-    aviso_lugar = ""
-    aviso_rpn_general = ""
-    aviso_rpn = ""
-
-    if estado_tp not in ("SIN_PDF", "NO_PDF", None):
-        aviso_wdm = obtener_aviso_wdm()
-        aviso_lugar = obtener_aviso_lugar()
-        aviso_rpn_general = obtener_aviso_rpn()
-        aviso_rpn = obtener_aviso_rpn_bloqueado()
-
-    def volver_menu(mensaje):
-        actualizar_estado_telegram(estado_ref, paso="menu")
-        enviar_mensaje_telegram(
-            chat_id,
-            f"{mensaje}\n\nSeleccione una opción:\n1: Iniciar TP\n2: Cerrar TP",
-            reply_markup=teclado_menu_telegram()
-        )
-
-    def continuar_flujo(mensaje):
-        actualizar_estado_telegram(
-            estado_ref,
-            paso="nombre",
-            accion=accion,
-            numero=numero_tp,
-            tp_info={
-                "descripcion": datos_tp_actual.get("descripcion", "N/A"),
-                "rpn": datos_tp_actual.get("rpn", "N/A"),
-                "fecha_plan": datos_tp_actual.get("fecha_plan", "N/A"),
-                "lugar": datos_tp_actual.get("lugar", "N/A"),
-            }
-        )
-        enviar_mensaje_telegram(chat_id, mensaje, reply_markup=teclado_volver_telegram())
-
-    if estado_tp == "SIN_PDF":
-        volver_menu(
-            "⚠️ El sistema no está disponible en este momento.\n\n"
-            "No hay PDFs cargados para validar el TP.\n"
-            f"Por favor contacte a la oficina al anexo: {ANEXO_TRANSPORTE}"
-        )
-        return
-
-    if estado_tp == "NO_PDF":
-        volver_menu(f"❌ TP {numero_tp} no fue encontrado en los PDFs disponibles.")
-        return
-
-    if estado_tp in ("ERROR", None):
-        volver_menu(
-            "⚠️ El sistema no está disponible en este momento.\n\n"
-            f"Por favor contacte a la oficina al anexo: {ANEXO_TRANSPORTE}"
-        )
-        return
-
-    if accion == "iniciar":
-        if estado_tp == "POSPUESTO":
-            volver_menu(f"⚠️ TP {numero_tp} se encuentra POSPUESTO. No es posible iniciarlo.")
-            return
-
-        if estado_tp == "EN_GESTION":
-            volver_menu(f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}")
-            return
-
-        if estado_tp == "EJECUTADO":
-            volver_menu(f"ℹ️ TP {numero_tp} ya fue EJECUTADO y cerrado anteriormente.")
-            return
-
-        if estado_tp == "EN_EJECUCION":
-            volver_menu(f"⚠️ TP {numero_tp} ya se encuentra iniciado. No es posible iniciarlo nuevamente.")
-            return
-
-        if estado_tp == "PLANIFICADO":
-            fecha_ok, _, _ = validar_fecha_plan_hoy()
-            if not fecha_ok:
-                volver_menu(mensaje_fecha_plan_no_corresponde(numero_tp))
-                return
-
-            if lugar_es_sitios():
-                volver_menu(MSG_SITIO_MOVIL)
-                return
-
-            if aviso_wdm or rpn_es_2500():
-                volver_menu(
-                    f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}"
+        def tarea():
+            comprobar_documentos(documentos, numero)
+            return self.cliente.leer_tp(numero), self.registro.pendientes(numero)
+
+        def listo(respuesta):
+            datos, pendientes = respuesta
+            if pendientes:
+                self.resultado.config(
+                    text="Hay envíos sin confirmar. Revise Herramientas → Pendientes.", fg="#b45309"
                 )
-                return
-
-            continuar_flujo(
-                f"✅ TP {numero_tp} validado correctamente.\n"
-                f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
-                "\n👤 Ingrese su nombre y apellido:\n"
-                "(Ejemplo: Juan Pérez)\n\n"
-                "Escriba volver o pulse el botón ↩️ Volver atrás."
-            )
-            return
-
-    if accion == "cerrar":
-        if estado_tp == "EN_EJECUCION":
-            if aviso_wdm or lugar_es_sitios() or rpn_es_2500():
-                volver_menu(
-                    f"TP requiere ser cerrado llamando al número de transporte: {ANEXO_TRANSPORTE}"
-                )
-                return
-
-            continuar_flujo(
-                f"✅ TP {numero_tp} validado para cierre.\n"
-                f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
-                "\n👤 Ingrese su nombre y apellido:\n"
-                "(Ejemplo: Juan Pérez)\n\n"
-                "Escriba volver o pulse el botón ↩️ Volver atrás."
-            )
-            return
-
-        if estado_tp == "PLANIFICADO":
-            volver_menu(f"⚠️ TP {numero_tp} aún no ha sido iniciado. No es posible cerrarlo.")
-            return
-
-        if estado_tp == "EJECUTADO":
-            volver_menu(f"ℹ️ TP {numero_tp} ya fue cerrado anteriormente.")
-            return
-
-        if estado_tp == "POSPUESTO":
-            volver_menu(f"⚠️ TP {numero_tp} se encuentra POSPUESTO. No es posible cerrarlo.")
-            return
-
-        if estado_tp == "EN_GESTION":
-            volver_menu(f"TP requiere ser gestionado llamando al número de transporte: {ANEXO_TRANSPORTE}")
-            return
-
-    volver_menu(f"⚠️ TP {numero_tp} no se encuentra en un estado válido para esta operación.")
-
-def procesar_cola_telegram():
-    global tp_validado, procesando_tarea
-
-    if procesando_tarea:
-        if not cola_telegram.empty():
-            datos_entrada = cola_telegram.get()
-            if datos_entrada.get("tipo") == "prevalidar":
-                actualizar_estado_telegram(datos_entrada.get("estado_ref"), paso="menu")
-                enviar_mensaje_telegram(
-                    datos_entrada.get("chat_id"),
-                    "⏳ En este momento se están procesando solicitudes previas de otros colegas.\n\n"
-                    "Por favor intenta nuevamente en unos minutos."
+                messagebox.showwarning(
+                    "Revisión necesaria",
+                    "Hay envíos cuyo resultado no se confirmó. Revise PSG y las operaciones pendientes antes de habilitar acciones.",
+                    parent=self.ventana,
                 )
             else:
-                recibir_tarea_telegram(datos_entrada)
-        ventana.after(1000, procesar_cola_telegram)
-        return
+                self.mostrar_datos(datos)
 
-    if not cola_tareas.empty():
-        datos = cola_tareas.get()
-        procesando_tarea = True
-        chat_id = datos.get("chat_id")
-        actualizar_estado_telegram(
-            datos.get("estado_ref"),
-            paso="procesando",
-            accion=datos.get("accion"),
-            numero=datos.get("numero"),
-            tarea_id=datos.get("tarea_id")
+        self.ejecutar(tarea, listo)
+
+    def mostrar_datos(self, datos):
+        self.validado = (
+            datos if datos["estado"] in ("PLANIFICADO", "EJECUCION", "EN EJECUCION") else None
         )
-        enviar_mensaje_telegram(
-            chat_id,
-            f"✅ Solicitud {datos.get('tarea_id')} en atención.\n\n"
-            f"Estamos procesando tu TP {datos.get('numero')}.",
-            reply_markup={"remove_keyboard": True}
+        self.resultado.config(
+            text=f"TP {datos['numero']}: {datos['estado']}",
+            fg="#166534" if self.validado else "#b45309",
         )
-    elif not cola_telegram.empty():
+        self.rpn.config(text=f"RPN: {datos['rpn']} | Fecha: {datos['fecha_plan']}")
 
-        datos = cola_telegram.get()
-        chat_id = datos.get("chat_id")
+    def contexto_accion(self):
+        if (
+            not self.conectada
+            or not self.validado
+            or self.numero.get().strip() != self.validado["numero"]
+        ):
+            raise ErrorAplicacion("Valide nuevamente el TP antes de actuar.")
+        return self.validado["numero"], tuple(self.documentos.values())
 
-        print("📩 Datos desde Telegram:", datos)
+    def operar(self, numero, accion, funcion):
+        identificador = self.registro.crear(numero, accion)
+        enviado = False
 
-        if datos.get("tipo") == "prevalidar":
-            responder_prevalidacion_telegram(datos)
-            ventana.after(1000, procesar_cola_telegram)
+        def antes_de_enviar():
+            nonlocal enviado
+            self.registro.estado(identificador, "enviando")
+            enviado = True
+
+        try:
+            resultado = funcion(antes_de_enviar, identificador)
+            self.registro.estado(identificador, "confirmada")
+            return resultado
+        except Exception:
+            self.registro.estado(identificador, "incierta" if enviado else "cancelada")
+            raise
+
+    def verificar_antes(self, numero, documentos):
+        comprobar_documentos(documentos, numero)
+        if self.registro.pendientes(numero):
+            raise ErrorAplicacion(
+                "Hay una operación pendiente de revisión para este TP. Use Herramientas → Revisar operaciones pendientes."
+            )
+
+    @staticmethod
+    def crear_texto(numero, nombre, telefono, empresa, accion):
+        hora = datetime.now().strftime("%H:%M:%S %Y-%m-%d")
+        partes = [f"{nombre}, Cel {telefono}"]
+        if empresa:
+            partes.append(f"Empresa {empresa}")
+        return f"{', '.join(partes)} {accion} TP {numero} a las {hora}"
+
+    def registrar_bitacora(self, numero, texto):
+        pendiente = {}
+
+        def envio(antes, identificador):
+            # El identificador se conserva solo en el registro local.
+            marca = completo = texto
+            pendiente.update(numero=numero, texto=completo, marca=marca, id=identificador)
+            self.cliente.documentar(numero, completo, marca, antes)
+            return completo
+
+        try:
+            completo = self.operar(numero, "bitacora", envio)
+            return completo, None
+        except Exception as error:
+            return pendiente.get("texto", texto), {
+                "datos": pendiente,
+                "mensaje": explicar_error(error),
+            }
+
+    def iniciar(self):
+        if self.ocupada:
+            return
+        try:
+            numero, documentos = self.contexto_accion()
+            nombre, telefono, empresa = validar_operador(
+                self.nombre.get(), self.telefono.get(), self.empresa.get()
+            )
+        except Exception as error:
+            messagebox.showwarning("Inicio", explicar_error(error), parent=self.ventana)
+            return
+        texto = self.crear_texto(numero, nombre, telefono, empresa, "inicia")
+
+        def tarea():
+            self.verificar_antes(numero, documentos)
+            datos = self.operar(
+                numero, "inicio", lambda antes, _: self.cliente.iniciar(numero, antes)
+            )
+            completo, pendiente = self.registrar_bitacora(numero, texto)
+            return datos, completo, pendiente
+
+        self.ejecutar(tarea, self.accion_completada, "Iniciando TP; no repita la acción…")
+
+    def accion_completada(self, respuesta):
+        datos, texto, pendiente = respuesta
+        self.mostrar_datos(datos)
+        self.ultima_bitacora = (datos.copy(), texto)
+        self.pendiente_bitacora = pendiente["datos"] if pendiente else None
+        if pendiente:
+            self.validado = None
+            self.resultado.config(
+                text="Inicio confirmado; bitácora pendiente de comprobar.", fg="#b45309"
+            )
+            messagebox.showwarning(
+                "Bitácora pendiente",
+                "El TP se inició, pero la bitácora no quedó confirmada.\nUse Herramientas → Recuperar última bitácora pendiente.\n\n"
+                + pendiente["mensaje"],
+                parent=self.ventana,
+            )
+        else:
+            messagebox.showinfo(
+                "PSG", "Operación y bitácora confirmadas en el portal.", parent=self.ventana
+            )
+
+    def mostrar_finalizar(self):
+        if self.ocupada:
+            return
+        try:
+            numero, documentos = self.contexto_accion()
+        except Exception as error:
+            messagebox.showwarning("Cierre", explicar_error(error), parent=self.ventana)
+            return
+        modal = tk.Toplevel(self.ventana)
+        modal.title(f"Finalizar TP {numero}")
+        modal.transient(self.ventana)
+        modal.resizable(False, False)
+        modal.grab_set()
+        panel = ttk.Frame(modal, padding=16)
+        panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="Nombre de quien finaliza").pack(anchor="w")
+        nombre = ttk.Entry(panel, width=34)
+        nombre.pack(fill="x", pady=(3, 8))
+        nombre.insert(0, self.nombre.get())
+        ttk.Label(panel, text="Teléfono").pack(anchor="w")
+        telefono = ttk.Entry(panel)
+        telefono.pack(fill="x", pady=(3, 12))
+        telefono.insert(0, self.telefono.get())
+
+        def confirmar():
+            try:
+                operador, celular, _ = validar_operador(nombre.get(), telefono.get())
+            except Exception as error:
+                messagebox.showwarning("Cierre", explicar_error(error), parent=modal)
+                return
+            texto = self.crear_texto(numero, operador, celular, "", "finaliza")
+
+            def tarea():
+                self.verificar_antes(numero, documentos)
+                self.cliente.comprobar_tp(numero, ("EJECUCION", "EN EJECUCION"))
+                completo, pendiente = self.registrar_bitacora(numero, texto)
+                if pendiente:
+                    return None, completo, pendiente
+                datos = self.operar(
+                    numero,
+                    "cierre",
+                    lambda antes, _: self.cliente.finalizar(numero, completo, antes),
+                )
+                return datos, completo, None
+
+            def listo(respuesta):
+                datos, completo, pendiente = respuesta
+                if pendiente:
+                    self.pendiente_bitacora = pendiente["datos"]
+                    self.validado = None
+                    self.resultado.config(
+                        text="No se envió el cierre: bitácora pendiente.", fg="#b45309"
+                    )
+                    messagebox.showwarning(
+                        "Cierre detenido",
+                        "No se envió la finalización porque la bitácora no quedó confirmada. Use Herramientas para recuperarla y luego vuelva a validar.",
+                        parent=self.ventana,
+                    )
+                else:
+                    self.accion_completada((datos, completo, None))
+
+            if self.ejecutar(tarea, listo, "Finalizando TP; no repita la acción…"):
+                modal.destroy()
+
+        ttk.Button(panel, text="Confirmar cierre", command=confirmar).pack(fill="x")
+
+    def exportar(self):
+        if self.ocupada or not self.ultima_bitacora:
+            return
+        datos, texto = self.ultima_bitacora
+        ruta = filedialog.asksaveasfilename(
+            parent=self.ventana,
+            title="Guardar bitácora TXT",
+            initialfile=f"TP_{datos['numero']}.txt",
+            defaultextension=".txt",
+            filetypes=[("Texto", "*.txt")],
+        )
+        if not ruta:
+            return
+        descripcion = " ".join(datos["descripcion"].split())[:500]
+        contenido = f"TP {datos['numero']} {descripcion}\n{texto}\n"
+
+        def guardar():
+            guardar_txt(ruta, contenido)
+
+        self.ejecutar(
+            guardar,
+            lambda _: messagebox.showinfo(
+                "Exportación", "Bitácora guardada en la ubicación elegida.", parent=self.ventana
+            ),
+            "Guardando bitácora…",
+        )
+
+    def diagnosticar(self):
+        def listo(mensaje):
+            self.resultado.config(text="Diagnóstico finalizado.")
+            messagebox.showinfo("Conexión con PSG", mensaje, parent=self.ventana)
+
+        self.ejecutar(
+            lambda: self.cliente.diagnosticar(self.config),
+            listo,
+            "Comprobando conexión sin enviar credenciales…",
+        )
+
+    def revisar_pendientes(self):
+        def listo(pendientes):
+            if not pendientes:
+                messagebox.showinfo(
+                    "Operaciones", "No hay envíos sin confirmar.", parent=self.ventana
+                )
+                return
+            detalle = "\n".join(
+                f"TP {tp}: {accion} ({estado})" for _, tp, accion, estado in pendientes[:20]
+            )
+            if messagebox.askyesno(
+                "Revisión manual de PSG",
+                detalle
+                + "\n\nRevise el resultado de cada envío en PSG.\n¿Ya verificó TODOS estos envíos y desea marcarlos como revisados?\nEsto no ejecuta acciones en el portal.",
+                parent=self.ventana,
+            ):
+
+                def marcar():
+                    for identificador, _, _, _ in pendientes[:20]:
+                        self.registro.estado(identificador, "revisada")
+
+                self.ventana.after_idle(
+                    lambda: self.ejecutar(
+                        marcar, lambda _: self.invalidar(), "Actualizando revisión local…"
+                    )
+                )
+
+        self.ejecutar(self.registro.pendientes, listo, "Consultando operaciones pendientes…")
+
+    def recuperar_bitacora(self):
+        pendiente = self.pendiente_bitacora
+        if self.ocupada:
+            return
+        if not pendiente or not pendiente.get("id"):
+            messagebox.showinfo(
+                "Bitácora",
+                "No hay una bitácora recuperable en esta ejecución. Si reinició la aplicación, revise los pendientes y el portal.",
+                parent=self.ventana,
+            )
+            return
+        if not messagebox.askyesno(
+            "Recuperar bitácora",
+            f"TP {pendiente['numero']}: se buscará el texto de la bitácora en PSG. Si no aparece, se intentará documentar una vez.\n¿Continuar?",
+            parent=self.ventana,
+        ):
             return
 
-        if datos.get("aprobado_admin"):
-            print(f"📥 Solicitud aprobada recibida por UI: {datos.get('tarea_id')} TP {datos.get('numero')}")
+        def tarea():
+            self.cliente.documentar(
+                pendiente["numero"],
+                pendiente["texto"],
+                pendiente["marca"],
+                lambda: self.registro.estado(pendiente["id"], "enviando"),
+            )
+            self.registro.estado(pendiente["id"], "confirmada")
 
-        recibir_tarea_telegram(datos)
-        ventana.after(1000, procesar_cola_telegram)
-        return
-    else:
-        ventana.after(1000, procesar_cola_telegram)
-        return
+        def listo(_):
+            self.pendiente_bitacora = None
+            self.invalidar()
+            messagebox.showinfo(
+                "Bitácora",
+                "Registro confirmado en PSG. Valide el TP nuevamente.",
+                parent=self.ventana,
+            )
 
-    print("📩 Procesando tarea:", datos)
-    if True:
+        self.ejecutar(tarea, listo, "Comprobando y recuperando bitácora…")
 
-        # Cargar número en UI y validar
-        entry_trabajo.delete(0, tk.END)
-        entry_trabajo.insert(0, datos["numero"])
-
-        entry_nombre.delete(0, tk.END)
-        entry_telefono.delete(0, tk.END)
-        entry_empresa.delete(0, tk.END)
-
-        if datos["accion"] == "iniciar":
-            entry_nombre.insert(0, datos["nombre"])
-            entry_telefono.insert(0, datos["telefono"])
-            entry_empresa.insert(0, datos.get("empresa", ""))
-
-        estado_tp = ejecutar_validacion()
-
-        hora = datetime.now().strftime("%H:%M")
-        accion_texto = "INICIAR" if datos["accion"] == "iniciar" else "CERRAR"
-        aviso_wdm = ""
-        aviso_lugar = ""
-        aviso_rpn = ""
-
-        if estado_tp not in ("SIN_PDF", "NO_PDF", None):
-            aviso_wdm = obtener_aviso_wdm()
-            aviso_lugar = obtener_aviso_lugar()
-            aviso_rpn = obtener_aviso_rpn_bloqueado()
-
-        MSG_SISTEMA_NO_DISPONIBLE = (
-            "⚠️ El sistema no está disponible en este momento.\n\n"
-            "Por favor contacte a la oficina al anexo:\n"
-            f"📞 {ANEXO_TRANSPORTE}\n\n"
-            "Un operador podrá asistirle y restablecer el sistema."
-        )
-
-        # ── INICIAR ──────────────────────────────────────
-        if datos["accion"] == "iniciar":
-
-            if estado_tp == "SIN_PDF":
-                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
-                notificar_grupo(
-                    f"⚠️ Solicitud fallida — Sin PDF cargado\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "NO_PDF":
-                enviar_mensaje_telegram(chat_id,
-                    f"❌ TP {datos['numero']} no fue encontrado en los PDFs del día.")
-                notificar_grupo(
-                    f"❌ TP no encontrado en PDFs\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "POSPUESTO":
-                enviar_mensaje_telegram(chat_id,
-                    f"⚠️ TP {datos['numero']} se encuentra POSPUESTO. No es posible iniciarlo.")
-                notificar_grupo(
-                    f"⚠️ TP POSPUESTO\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "EN_GESTION":
-                enviar_mensaje_telegram(chat_id,
-                    f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}")
-                notificar_grupo(
-                    f"⚠️ TP EN GESTION\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "EJECUTADO":
-                enviar_mensaje_telegram(chat_id,
-                    f"ℹ️ TP {datos['numero']} ya fue EJECUTADO y cerrado anteriormente.")
-                notificar_grupo(
-                    f"ℹ️ TP ya EJECUTADO\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "EN_EJECUCION":
-                enviar_mensaje_telegram(chat_id,
-                    f"⚠️ Estimado {datos['nombre']}, el TP {datos['numero']} ya se encuentra iniciado (EN EJECUCIÓN).")
-                notificar_grupo(
-                    f"⚠️ TP ya EN EJECUCIÓN\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "PLANIFICADO":
-                fecha_ok, _, _ = validar_fecha_plan_hoy()
-                if not fecha_ok:
-                    mensaje_fecha = mensaje_fecha_plan_no_corresponde(datos["numero"])
-                    enviar_mensaje_telegram(chat_id, mensaje_fecha)
-                    notificar_admin(
-                        f"❌ ERROR {datos.get('tarea_id')} TP {datos['numero']}\n"
-                        "Fecha de planificación no corresponde al día actual."
-                    )
-                    finalizar_tarea(datos)
-                    return
-
-                if lugar_es_sitios():
-                    enviar_mensaje_telegram(
-                        chat_id,
-                        MSG_SITIO_MOVIL
-                    )
-                    notificar_grupo(
-                        f"⛔ TP NO INICIADO AUTOMÁTICAMENTE\n"
-                        f"Motivo: Lugar Sitios detectado\n"
-                        f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                        f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
-                        f"🔢 RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                        f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
-                        f"{aviso_wdm}{aviso_lugar}{aviso_rpn}"
-                        f"🕐 {hora} hrs"
-                    )
-                    finalizar_tarea(datos)
-                    return
-
-                if rpn_es_2500():
-                    enviar_mensaje_telegram(
-                        chat_id,
-                        f"TP requiere ser iniciado llamando al número de transporte: {ANEXO_TRANSPORTE}"
-                    )
-                    notificar_grupo(
-                        f"⛔ TP NO INICIADO AUTOMÁTICAMENTE\n"
-                        f"Motivo: condición especial detectada\n"
-                        f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                        f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
-                        f"🔢 RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                        f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
-                        f"{aviso_wdm}{aviso_lugar}{aviso_rpn}"
-                        f"🕐 {hora} hrs"
-                    )
-                    finalizar_tarea(datos)
-                    return
-
-                def run_inicio():
-                    ok = iniciar_tp()
-                    if ok:
-                        exportar_txt()
-                        hora_fin = datetime.now().strftime("%H:%M")
-                        actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
-                        enviar_mensaje_telegram(chat_id, "TP iniciado.")
-                        notificar_admin(
-                            f"✅ INICIO_EXITOSO {datos.get('tarea_id')} TP {datos['numero']}\n"
-                            f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                            f"📥 Cola pendiente: {cola_tareas.qsize()}"
-                        )
-                        notificar_grupo(
-                            f"✅ TP INICIADO a las {hora_fin} hrs."
-                        )
-                    else:
-                        enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
-                        notificar_admin(
-                            f"❌ ERROR {datos.get('tarea_id')} TP {datos['numero']}\n"
-                            "No fue posible iniciar el TP."
-                        )
-                        notificar_grupo(
-                            f"❌ Error al iniciar TP\n"
-                            f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                            f"📋 TP: {datos['numero']}\n"
-                            f"{aviso_wdm}{aviso_lugar}"
-                            f"🕐 {hora} hrs"
-                        )
-                    finalizar_tarea(datos)
-                ventana.after(1500, run_inicio)
-                return
-
-            elif estado_tp in ("ERROR", None):
-                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
-                notificar_grupo(
-                    f"❌ Error de sistema\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-        # ── CERRAR ───────────────────────────────────────
+    def cerrar(self):
+        if self.cerrando:
+            return
+        self.cerrando = True
+        if self.ocupada:
+            self.resultado.config(text="Terminando la operación antes de cerrar…")
         else:
+            self.terminar_cierre()
 
-            if estado_tp == "SIN_PDF":
-                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
-                notificar_grupo(
-                    f"⚠️ Solicitud fallida — Sin PDF cargado\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"🕐 {hora} hrs"
-                )
+    def terminar_cierre(self):
+        futuro = self.executor.submit(self.cliente.cerrar)
 
-            elif estado_tp == "NO_PDF":
-                enviar_mensaje_telegram(chat_id,
-                    f"❌ TP {datos['numero']} no fue encontrado en los PDFs del día.")
-                notificar_grupo(
-                    f"❌ TP no encontrado en PDFs\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "EJECUTADO":
-                enviar_mensaje_telegram(chat_id,
-                    f"ℹ️ TP {datos['numero']} ya fue cerrado anteriormente.")
-                notificar_grupo(
-                    f"ℹ️ TP ya EJECUTADO\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "PLANIFICADO":
-                enviar_mensaje_telegram(chat_id,
-                    f"⚠️ TP {datos['numero']} aún no ha sido iniciado. No es posible cerrarlo.")
-                notificar_grupo(
-                    f"⚠️ TP aún no iniciado\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "POSPUESTO":
-                enviar_mensaje_telegram(chat_id,
-                    f"⚠️ TP {datos['numero']} se encuentra POSPUESTO.")
-                notificar_grupo(
-                    f"⚠️ TP POSPUESTO\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "EN_GESTION":
-                enviar_mensaje_telegram(chat_id,
-                    f"TP requiere ser gestionado llamando al número de transporte: {ANEXO_TRANSPORTE}")
-                notificar_grupo(
-                    f"⚠️ TP EN GESTION\n"
-                    f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                    f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                    f"{aviso_wdm}{aviso_lugar}"
-                    f"🕐 {hora} hrs"
-                )
-
-            elif estado_tp == "EN_EJECUCION":
-                if aviso_wdm or lugar_es_sitios() or rpn_es_2500():
-                    enviar_mensaje_telegram(
-                        chat_id,
-                        f"TP requiere ser cerrado llamando al número de transporte: {ANEXO_TRANSPORTE}"
-                    )
-                    notificar_grupo(
-                        f"⛔ TP NO CERRADO AUTOMÁTICAMENTE\n"
-                        f"Motivo: condición especial detectada\n"
-                        f"👤 {datos['nombre']} | 📱 {datos['telefono']}\n"
-                        f"📋 TP: {datos['numero']} | ⚙️ {accion_texto}\n"
-                        f"📄 Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
-                        f"🔢 RPN: {datos_tp_actual.get('rpn', 'N/A')}\n"
-                        f"📅 Fecha plan: {datos_tp_actual.get('fecha_plan', 'N/A')}\n"
-                        f"{aviso_wdm}{aviso_lugar}{aviso_rpn}"
-                        f"🕐 {hora} hrs"
-                    )
-                    finalizar_tarea(datos)
-                    return
-
-                nombre_cierre = datos["nombre"]
-                telefono_cierre = datos["telefono"]
-
-                def run_cierre():
-                    enviar_mensaje_telegram(
-                        chat_id,
-                        f"🔒 Validación correcta. Cerrando TP {datos['numero']}...",
-                        reply_markup={"remove_keyboard": True}
-                    )
-
-                    def responder_resultado_cierre(ok):
-                        if ok:
-                            hora_fin = datetime.now().strftime("%H:%M")
-                            marcar_tp_finalizado_txt(datos["numero"])
-                            actualizar_estado_telegram(datos.get("estado_ref"), paso="menu")
-                            enviar_mensaje_telegram(chat_id,
-                                f"✅ TP {datos['numero']} finalizado correctamente.\n"
-                                f"Operador: {nombre_cierre} | Tel: {telefono_cierre}")
-                            notificar_admin(
-                                f"✅ CIERRE_EXITOSO {datos.get('tarea_id')}\n" 
-                                f" TP {datos['numero']}\n"
-                                f" Descripción: {datos_tp_actual.get('descripcion', 'N/A')}\n"
-                                f"👤 {nombre_cierre} | 📱 {telefono_cierre}"
-                            )
-                            notificar_grupo(
-                                f"🔒 TP CERRADO a las {hora_fin} hrs."
-                            )
-                        else:
-                            enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
-                            notificar_admin(
-                                f"❌ ERROR {datos.get('tarea_id')} TP {datos['numero']}\n"
-                                "No fue posible cerrar el TP."
-                            )
-                            notificar_grupo(
-                                f"❌ Error al cerrar TP\n"
-                                f"👤 {nombre_cierre} | 📱 {telefono_cierre}\n"
-                                f"📋 TP: {datos['numero']}\n"
-                                f"{aviso_wdm}{aviso_lugar}"
-                                f"🕐 {hora} hrs"
-                            )
-                        finalizar_tarea(datos)
-
-                    mostrar_finalizar_tp(
-                        nombre_inicial=nombre_cierre,
-                        telefono_inicial=telefono_cierre,
-                        auto_confirmar=True,
-                        on_result=responder_resultado_cierre,
-                        mostrar_error=False
-                    )
-
-                ventana.after(1500, run_cierre)
+        def esperar():
+            if not futuro.done():
+                self.ventana.after(80, esperar)
                 return
+            self.executor.shutdown(wait=False)
+            self.ventana.destroy()
 
-            elif estado_tp in ("ERROR", None):
-                enviar_mensaje_telegram(chat_id, MSG_SISTEMA_NO_DISPONIBLE)
+        self.ventana.after(80, esperar)
 
-    finalizar_tarea(datos)
 
-# =====================
-# MAIN
-# =====================
 def main():
-    global ui_activa
-    global ventana, entry_trabajo, entry_nombre, entry_telefono, entry_empresa
-    global label_pdf_1, label_pdf_2, label_resultado, label_rpn
-    global btn_iniciar, btn_finalizar, btn_mantencion, label_mantencion
-
+    multiprocessing.freeze_support()
     ventana = tk.Tk()
-    ui_activa = True
-    ventana.title("Validador Trabajo Programado")
-    ventana.protocol("WM_DELETE_WINDOW", cerrar_aplicacion)
-    ventana.geometry("320x760")
-    ventana.resizable(False, False)
-    ventana.configure(bg="#f3f4f6")
+    ventana.withdraw()
+    instancia = InstanciaUnica()
+    try:
+        if not instancia.adquirir():
+            messagebox.showinfo(
+                "Validador TP",
+                "Ya hay una instancia abierta o no se pudo bloquear su registro local. Revise la barra de tareas y los permisos de su carpeta de usuario.",
+                parent=ventana,
+            )
+            ventana.destroy()
+            return
 
-    card = tk.Frame(ventana, bg="white", padx=24, pady=20, bd=1, relief="solid")
-    card.place(relx=0.5, rely=0.5, anchor="center")
+        def fallo_interfaz(tipo, error, traceback):
+            messagebox.showerror("Validador TP", explicar_error(error), parent=ventana)
 
-    tk.Label(card, text="Validador TP", font=("Segoe UI", 14, "bold"), bg="white").pack(anchor="w")
-    tk.Label(card, text="Control Trabajo Programado", font=("Segoe UI", 9), fg="#6b7280", bg="white").pack(anchor="w", pady=(0, 12))
+        ventana.report_callback_exception = fallo_interfaz
+        app = Aplicacion(ventana)
+        ventana.deiconify()
+        ventana.after(200, app.mostrar_login)
+        ventana.mainloop()
+    except Exception as error:
+        messagebox.showerror("No se pudo iniciar", explicar_error(error), parent=ventana)
+        ventana.destroy()
+    finally:
+        instancia.liberar()
 
-    tk.Label(card, text="Número TP", bg="white").pack(anchor="w")
-    entry_trabajo = tk.Entry(card, font=("Segoe UI", 10))
-    entry_trabajo.pack(fill="x", ipady=3, pady=(2, 8))
-    entry_trabajo.bind("<Return>", ejecutar_validacion)
-
-    ttk.Button(card, text="📎 Cargar PDF 1", command=cargar_pdf_1).pack(fill="x")
-    label_pdf_1 = tk.Label(card, text="❌ Sin PDF 1", fg="red", bg="white", font=("Segoe UI", 9))
-    label_pdf_1.pack(anchor="w", pady=(4, 8))
-
-    ttk.Button(card, text="📎 Cargar PDF 2", command=cargar_pdf_2).pack(fill="x")
-    label_pdf_2 = tk.Label(card, text="❌ Sin PDF 2", fg="red", bg="white", font=("Segoe UI", 9))
-    label_pdf_2.pack(anchor="w", pady=(4, 6))
-
-    ttk.Button(card, text="✅ Validar TP", command=ejecutar_validacion).pack(fill="x", pady=(0, 10))
-
-    label_resultado = tk.Label(
-        card, text="", font=("Segoe UI", 10, "bold"),
-        bg="#f9fafb", padx=10, pady=6,
-        wraplength=460, justify="center", relief="solid", bd=1
-    )
-    label_resultado.pack(fill="x", pady=(0, 8))
-
-    label_rpn = tk.Label(
-        card, text="", bg="#eef2ff", fg="#1e3a8a",
-        font=("Segoe UI", 9, "bold"), padx=10, pady=5, relief="solid", bd=1
-    )
-    label_rpn.pack(fill="x", pady=(0, 14))
-
-    tk.Label(card, text="Nombre", bg="white").pack(anchor="w")
-    entry_nombre = tk.Entry(card)
-    entry_nombre.pack(fill="x", ipady=3, pady=(2, 6))
-
-    tk.Label(card, text="Teléfono", bg="white").pack(anchor="w")
-    entry_telefono = tk.Entry(card)
-    entry_telefono.pack(fill="x", ipady=3, pady=(2, 6))
-
-    tk.Label(card, text="Empresa (Opcional)", bg="white").pack(anchor="w")
-    entry_empresa = tk.Entry(card)
-    entry_empresa.pack(fill="x", ipady=3, pady=(2, 10))
-
-    btn_iniciar = ttk.Button(card, text="🚀 Iniciar TP", command=iniciar_tp, state="disabled")
-    btn_iniciar.pack(fill="x", pady=(0, 6))
-
-    btn_finalizar = ttk.Button(card, text="🔒 Finalizar TP", command=mostrar_finalizar_tp, state="disabled")
-    btn_finalizar.pack(fill="x", pady=(0, 6))
-
-    ttk.Button(card, text="📄 Exportar TXT", command=exportar_txt).pack(fill="x", pady=(0, 6))
-
-    label_mantencion = tk.Label(
-        card,
-        text="Mantención Telegram: INACTIVA",
-        bg="#ecfdf5",
-        fg="#065f46",
-        font=("Segoe UI", 9, "bold"),
-        padx=10,
-        pady=5,
-        relief="solid",
-        bd=1
-    )
-    label_mantencion.pack(fill="x", pady=(4, 6))
-
-    btn_mantencion = ttk.Button(
-        card,
-        text="Activar mantención Telegram",
-        command=alternar_mantenimiento_telegram
-    )
-    btn_mantencion.pack(fill="x", pady=(0, 6))
-    Tooltip(
-        btn_mantencion,
-        "SOLO presionar si la aplicación NO está funcionando, ya que este botón desactiva el chat, indicando al usuario que nos llame a nosotros."
-    )
-
-    footer = tk.Frame(card, bg="white")
-    footer.pack(fill="x", pady=(6, 0))
-
-    ttk.Button(footer, text="🔄 Restaurar sesión", command=restaurar_sesion).pack(side="left", expand=True, fill="x", padx=(0, 4))
-    ttk.Button(footer, text="Cerrar", command=cerrar_aplicacion).pack(side="right", expand=True, fill="x", padx=(4, 0))
-
-    ventana.after(200, mostrar_login)
-    ventana.after(1000, procesar_cola_telegram)
-    ventana.mainloop()
 
 if __name__ == "__main__":
     main()

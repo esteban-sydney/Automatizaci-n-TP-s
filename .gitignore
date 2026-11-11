@@ -1,6 +1,36 @@
-__pycache__/
+# Entornos y archivos generados
+.venv/
 venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+build/
+dist/
+respaldos/
+/tmp*/
+*.tmp
+
+# Datos del operador, registros y exportaciones
+*.log
+bitacora_tp.txt
+TP_*.txt
+*.sqlite*
+*.db
+diagnostico_acceso.json
+
+# Credenciales y configuración local
 .env
-.log
-.idea/
-test_playwright.py
+.env.*
+!.env.example
+.aws/
+.codex/
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Archivos del sistema
+Thumbs.db
+Desktop.ini
+.DS_Store

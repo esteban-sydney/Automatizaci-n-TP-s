@@ -42,6 +42,10 @@ class PortalSimuladoTests(unittest.TestCase):
         self.duplicados_identicos = False
         self.duplicados_distintos = False
         self.sin_cierre = False
+        self.inicio_continuar = False
+        self.inicio_volver_primero = False
+        self.inicio_solo_volver = False
+        self.inicio_otro_tp = False
         self.tiempos = []
         self.ultima_tecla_ms = 0
         self.teclas_recibidas = 0
@@ -58,6 +62,8 @@ class PortalSimuladoTests(unittest.TestCase):
         acciones = """<a href="/start.php">Iniciar Ejecucion</a>
         <a href="/note.php">Documentar desarrollo de trabajo</a>
         <a href="/finish.php">Finalizar Ejecucion</a>"""
+        if self.inicio_otro_tp:
+            acciones = acciones.replace("/start.php", "/tp/init_exec.php?id=999999")
         if self.acciones_acentuadas:
             acciones = acciones.replace("Finalizar Ejecucion", "🔒 Finalizar Ejecución")
         if self.duplicados_identicos:
@@ -115,10 +121,18 @@ class PortalSimuladoTests(unittest.TestCase):
             cuerpo = '<a href="/tp/index.php">Trabajos programados</a>'
         elif path == "/home.php":
             cuerpo = '<h1>PSG Redes</h1><div role="dialog">Atención: políticas de seguridad de ENTEL<button>Cerrar</button></div>'
-        elif path == "/start.php":
-            cuerpo = '<form action="/do-start.php" method="post"><input type="submit" value="Confirmar"></form>'
+        elif path in ("/start.php", "/tp/init_exec.php"):
+            confirmar = '<input type="submit" name="accion" value="Confirmar">'
+            volver = '<input type="submit" name="accion" value="Volver">'
+            if self.inicio_continuar:
+                confirmar = '<button name="accion" value="Continuar">Continuar</button>'
+            if self.inicio_solo_volver:
+                confirmar = ""
+            controles = volver + confirmar if self.inicio_volver_primero else confirmar + volver
+            cuerpo = f'<h1>Iniciar ejecucion</h1><h2>Trabajo programado 123456</h2><form action="/do-start.php" method="post">{controles}</form>'
         elif path == "/do-start.php":
-            self.estado = "EN EJECUCION"
+            if datos.get("accion") in (["Confirmar"], ["Continuar"]):
+                self.estado = "EN EJECUCION"
             cuerpo = self.pagina_tp()
         elif path == "/note.php":
             cuerpo = """<form action="/save-note.php" method="post">
@@ -178,6 +192,46 @@ class PortalSimuladoTests(unittest.TestCase):
         self.assertEqual(envios_antes, ["inicio", "bitacora", "cierre"])
         self.assertEqual(self.envios.count("/do-start.php"), 1)
         self.assertEqual(self.envios.count("/do-finish.php"), 1)
+
+    def test_inicio_confirmar_no_confunde_con_volver(self):
+        self.cliente.login("operador-prueba", "clave-de-prueba", Configuracion())
+        self.cliente.leer_tp("123456")
+        antes = Mock()
+        datos = self.cliente.iniciar("123456", antes)
+        self.assertEqual(datos["estado"], "EN EJECUCION")
+        antes.assert_called_once()
+        self.assertEqual(self.envios.count("/do-start.php"), 1)
+
+    def test_inicio_continuar_con_volver_como_primer_boton(self):
+        self.inicio_continuar = self.inicio_volver_primero = True
+        self.cliente.login("operador-prueba", "clave-de-prueba", Configuracion())
+        self.cliente.leer_tp("123456")
+        datos = self.cliente.iniciar("123456", lambda: None)
+        self.assertEqual(datos["estado"], "EN EJECUCION")
+        self.assertEqual(self.envios.count("/do-start.php"), 1)
+
+    def test_confirmacion_otro_tp_no_se_envia(self):
+        self.inicio_otro_tp = True
+        self.cliente.login("operador-prueba", "clave-de-prueba", Configuracion())
+        self.cliente.leer_tp("123456")
+        antes = Mock()
+        with self.assertRaisesRegex(ErrorAplicacion, "otro TP"):
+            self.cliente.iniciar("123456", antes)
+        antes.assert_not_called()
+        self.assertNotIn("/do-start.php", self.envios)
+
+    def test_pantalla_con_solo_volver_no_envia_inicio(self):
+        self.inicio_solo_volver = True
+        self.cliente.login("operador-prueba", "clave-de-prueba", Configuracion())
+        self.cliente.leer_tp("123456")
+        antes = Mock()
+        with (
+            patch("psg_core.TIMEOUT", 400),
+            self.assertRaisesRegex(ErrorAplicacion, "Confirmar o Continuar"),
+        ):
+            self.cliente.iniciar("123456", antes)
+        antes.assert_not_called()
+        self.assertNotIn("/do-start.php", self.envios)
 
     def test_login_incorrecto_no_confirma_acceso(self):
         with self.assertRaises(ErrorAplicacion):

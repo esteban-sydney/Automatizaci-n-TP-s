@@ -90,6 +90,11 @@ Carga documentos de origen corporativo conocido.
 La app vuelve a comprobar el TP y su estado antes de enviar una acción. El
 inicio de un trabajo vencido queda bloqueado. No se asume que un envío tuvo
 éxito: debe comprobarse el estado del trabajo o el texto de su bitácora.
+Después de **Iniciar ejecución**, la app reconoce la pantalla intermedia y
+pulsa **Confirmar** o **Continuar** dentro del formulario. No selecciona
+**Volver**, aunque aparezca primero. Si la dirección indica otro número de TP,
+se detiene antes de enviar. Luego comprueba el estado en ejecución y registra
+la bitácora.
 Los identificadores técnicos se conservan solo en el registro local; no se
 añaden al texto de inicio, cierre ni a los TXT exportados.
 

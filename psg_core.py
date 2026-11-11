@@ -7,7 +7,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from playwright.sync_api import Error as BrowserError
 from playwright.sync_api import TimeoutError as BrowserTimeout
@@ -499,15 +499,25 @@ class ClientePSG:
         self._pausar()
         self.comprobar_pagina()
 
-    def enviar_formulario(self, texto=None, confirmar=False, antes_de_enviar=None):
+    def enviar_formulario(
+        self, texto=None, confirmar=False, antes_de_enviar=None, numero_esperado=None
+    ):
         self.comprobar_pagina()
         marco = self.marco_formulario
         if marco is None or marco.is_detached():
             marco = self.page.main_frame
+        if numero_esperado is not None:
+            parametros = parse_qs(urlsplit(marco.url).query)
+            if "id" in parametros and parametros["id"] != [numero_esperado]:
+                raise ErrorAplicacion(
+                    "La pantalla de confirmación corresponde a otro TP. No se envió la acción."
+                )
         campo = (
             marco.locator("textarea").filter(visible=True).first
             if texto is not None
-            else marco.locator('form input[type="submit"], form button[type="submit"]')
+            else marco.locator(
+                'form input[type="submit"], form button[type="submit"], form button:not([type])'
+            )
             .filter(visible=True)
             .first
         )
@@ -517,13 +527,25 @@ class ClientePSG:
             campo.fill("")
             campo.press_sequentially(texto, delay=self.demora_tecla_ms)
         self._pausar()
-        selector = (
-            'input[name="accion"][value="Confirmar"]'
-            if confirmar
-            else 'input[type="submit"], button[type="submit"]'
+        controles = formulario.locator(
+            'input[type="submit"], button[type="submit"], button:not([type])'
         )
-        boton = formulario.locator(selector).filter(visible=True)
-        boton.first.wait_for(state="visible", timeout=TIMEOUT)
+        if confirmar:
+            # PSG muestra Confirmar y Volver como submit del mismo formulario.
+            # Seleccionar por la acción evita confundir la vuelta con el envío.
+            boton = formulario.get_by_role(
+                "button", name=re.compile(r"^\s*(Confirmar|Continuar)\s*$", re.I)
+            ).and_(controles)
+        else:
+            boton = controles
+        boton = boton.filter(visible=True)
+        try:
+            boton.first.wait_for(state="visible", timeout=TIMEOUT)
+        except BrowserTimeout as error:
+            detalle = "Confirmar o Continuar" if confirmar else "guardar el formulario"
+            raise ErrorAplicacion(
+                f"PSG no mostró un botón para {detalle}. No se envió la acción ni se pulsó Volver."
+            ) from error
         if boton.count() != 1:
             raise ErrorAplicacion(
                 "El formulario tiene más de una confirmación o cambió. Revise PSG."
@@ -558,7 +580,9 @@ class ClientePSG:
         if datetime.strptime(datos["fecha_plan"], "%Y-%m-%d").date() < datetime.now().date():
             raise ErrorAplicacion("No se puede iniciar un TP vencido.")
         self._abrir_accion("Iniciar Ejecucion")
-        self.enviar_formulario(antes_de_enviar=antes_de_enviar)
+        self.enviar_formulario(
+            confirmar=True, antes_de_enviar=antes_de_enviar, numero_esperado=numero
+        )
         datos = self.leer_tp(numero)
         if datos["estado"] not in ("EJECUCION", "EN EJECUCION"):
             raise ErrorAplicacion(
@@ -569,7 +593,9 @@ class ClientePSG:
     def finalizar(self, numero, texto, antes_de_enviar):
         self.comprobar_tp(numero, ("EJECUCION", "EN EJECUCION"))
         self._abrir_accion("Finalizar Ejecucion")
-        self.enviar_formulario(texto, confirmar=True, antes_de_enviar=antes_de_enviar)
+        self.enviar_formulario(
+            texto, confirmar=True, antes_de_enviar=antes_de_enviar, numero_esperado=numero
+        )
         datos = self.leer_tp(numero)
         if datos["estado"] != "EJECUTADO":
             raise ErrorAplicacion(
